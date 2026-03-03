@@ -1399,8 +1399,50 @@ Client code 只看到 `struct opaque *`，編譯後的 binary 只包含指標操
 
 當 struct 內部需要修改（新增成員、調整順序、改變大小）時，只需重新編譯 library，client code 不用重新編譯——因為 client 的 binary 從未依賴 struct 的大小或佈局，只依賴指標大小。這就是 binary compatibility。
 
-Linux 核心中大量使用這個模式，例如 `struct file`、`struct inode` 等對 userspace 暴露的型態，都透過指標操作而非直接存取成員。
+Linux 核心中可以找到這個模式的實例。例如 [`include/linux/cdev.h:10-12`](https://github.com/torvalds/linux/blob/v6.13/include/linux/cdev.h#L10-L12) 以 forward declaration 宣告 `struct file_operations`、`struct inode`、`struct module`，使 `cdev` 子系統的 header 不需引入整個 `fs.h`；[`include/linux/net.h:29-33`](https://github.com/torvalds/linux/blob/v6.13/include/linux/net.h#L29-L33) 同樣 forward declare `struct inode`、`struct file`、`struct net` 等，讓 socket 子系統僅透過指標操作這些型態。
 
 #### 3. 為何 incomplete type 只能搭配 pointer？
 
 因為 incomplete type 缺少「確定大小」的資訊（§6.2.5¶1）。要分配記憶體（宣告變數、建立陣列）或計算大小（`sizeof`），compiler 必須知道型態的完整定義。唯一不需要知道大小的操作就是「存一個位址」——而指標的大小由架構決定，與所指向的型態無關。
+
+---
+
+## 對話回顧：2026-03-03 Session
+
+本次 session 延續前次對話（context 壓縮後恢復），主要處理收尾工作與流程改善。
+
+### 步驟 1：補齊 README 與 commit
+
+**我的指令：** 延續上次的工作
+**Claude 回報：** 發現 `homework/warmup/README.md` 缺少 opaque test section（前次寫了程式碼和 Makefile 但漏了 README）
+**結果：** 補上 opaque test section 並 commit（`34769a6`）
+
+### 步驟 2：證據紀律
+
+**我的提問：** 「你提到 Linux 核心中大量使用這個模式，你這樣不行啦，寫作業講話要有所本，要有證據！」
+**Claude 回報：** 確實在 notes 中寫了「Linux 核心中大量使用這個模式，例如 `struct file`、`struct inode`」但沒有附任何原始碼路徑或行號
+**我的決定：**
+1. 在 CLAUDE.md 新增「證據紀律」規則——所有技術主張都必須有憑據，無法提供就不寫
+2. 修正 notes 中的無證據段落
+**結果：** 用本地 `/tmp/linux` (v6.13) 搜尋，找到具體實例：
+- `include/linux/cdev.h:10-12` — forward declare `struct file_operations`、`struct inode`、`struct module`
+- `include/linux/net.h:29-33` — forward declare `struct inode`、`struct file`、`struct net`
+
+### 步驟 3：linux-source skill
+
+**我的提問：** 「為什麼不在本地 /tmp/linux 找？」「skill linux-source 不是會讓你去本地搜尋？」
+**Claude 回報：** 承認忘了有本地核心原始碼和 `linux-source` skill，已記入 memory
+**我的決定：** 以後查核心原始碼一律用本地 `/tmp/linux`，不跑網路
+
+### 步驟 4：對話回顧紀律
+
+**我的提問：** 「你沒寫 notes 對話回顧，請在 CLAUDE.md 紀錄每次告一段落就把對話紀錄寫入 notes」
+**Claude 回報：** CLAUDE.md 已有「Notes 撰寫規範：記錄人機互動過程」但沒落實
+**結果：** 在 CLAUDE.md 新增「對話回顧紀律（強制）」——session 結束時必須將互動過程寫入 notes
+
+### 待續
+
+下次從第 8 題開始討論（尚未與學習者討論，需先聽學習者想法再寫）：
+- Object lifetime 結束但 dereference 為 UB
+- Strict aliasing with float（`-O2` 輸出分析）
+- `void f(int a[10])` vs `void g(int (*a)[10])` ABI 差異
