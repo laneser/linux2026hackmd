@@ -1312,3 +1312,95 @@ C99 §6.3.2.1¶4：
 `fp` 是一個普通的指標變數，`&fp` 取的是該變數在 stack 上的位址，型態為 `int (**)(const char *)`（pointer to function pointer）。值不同於 `fp`，多了一層 indirection。
 
 驗證結果中 `&puts` = `0x...dbe0`（函式位址），而 `&fp` = `0x...d640`（變數位址），兩者不同。
+
+### 儲存-執行模型與指標的本質
+
+- [ ] 從「儲存-執行模型」角度解釋 `int a = 10; char *p = (char *)&a;`
+
+〈[你所不知道的 C 語言：指標篇](https://hackmd.io/@sysprog/c-pointer)〉將計算機分為兩類：
+
+1. **儲存-執行模型**（CPU + 記憶體）— 指令與資料皆儲存在記憶體中，CPU 透過位址匯流排存取。通用但間接
+2. **特製硬體**（ASIC / FPGA）— 邏輯直接實作在電路中，不需從記憶體讀取指令。高效但不通用
+
+C 語言是為儲存-執行模型設計的。在這個模型中，CPU 無法直接操作記憶體中的數值，必須透過位址存取——這就是指標存在的根本原因。
+
+`int a = 10; char *p = (char *)&a;` 所做的事：將數值 10 寫入記憶體某處，再將該位址存入另一處記憶體。整個過程就是「給定位址，讀寫資料」的重複。
+
+#### 1. CPU 實際做哪些事？
+
+對應的 x86-64 機械碼與組合語言（`gcc -std=c99 -O0` 編譯後以 `objdump -d -M intel` 反組譯）：
+
+```
+1b: c7 45 ec 0a 00 00 00    mov  DWORD PTR [rbp-0x14],0xa   ; int a = 10
+22: 48 8d 45 ec             lea  rax,[rbp-0x14]              ; &a
+26: 48 89 45 f0             mov  QWORD PTR [rbp-0x10],rax   ; char *p = ...
+```
+
+`(char *)` 強制轉型**不產生任何 CPU 指令**。位址的值不變，轉型只告訴 compiler 後續對 `p` 做 dereference 時按 1 byte（`char`）而非 4 bytes（`int`）存取。型態系統是編譯期的抽象，CPU 只看位址和資料寬度。
+
+#### 2. 為何 C 語言可以被視為 assembly 的語法抽象？
+
+教材原文：
+
+> C 語言本質上就是組合語言的簡化版本，它延續組合語言的邏輯，用指標創造世界。
+
+C 語言的構件幾乎一對一對應到硬體操作：
+
+| C 語言 | 硬體 / 組合語言 |
+|:---|:---|
+| 變數 | 記憶體位址（stack 或 data segment） |
+| 型態 | 決定指令選擇（`add` vs `fadd`）與存取寬度 |
+| 指標 | 原始記憶體位址 |
+| `*p`（dereference） | 間接定址（indirect addressing） |
+| 函式呼叫 | `call` 指令 + stack frame |
+
+其他高階語言（Java、Python）刻意隱藏記憶體位址，提供垃圾回收等抽象層。C 語言選擇不隱藏——它直接暴露儲存-執行模型的運作方式，讓程式設計師以位址（指標）操作一切。這也是為什麼 C 語言適合撰寫作業系統和嵌入式系統：它與硬體之間幾乎沒有中間層。
+
+### Opaque pointer 與 incomplete type
+
+- [ ] 考慮以下程式碼：`struct opaque; struct opaque *create(void); void destroy(struct opaque *);`
+
+`struct opaque;` 是一個 forward declaration，宣告了 `struct opaque` 這個型態存在，但不定義其成員。此時 `struct opaque` 是一個 incomplete type。搭配 `create()` 和 `destroy()` 構成 opaque pointer pattern——client code 只透過指標操作 object，不需知道 struct 的內部結構。
+
+撰寫 [`opaque.c`](https://github.com/laneser/warmup/blob/main/opaque.c) 測試 incomplete type 的限制（`make opaque_report`）：
+
+```
+Incomplete type (opaque pointer) test -- gcc 13
+
+Compile-time: what works with incomplete type (C99 6.2.5)
+  -O0, -Og, -O1, -Os, -O2, -O3, -Ofast     struct opaque *p: compiled
+  -O0, -Og, -O1, -Os, -O2, -O3, -Ofast     struct opaque x: compile error
+  -O0, -Og, -O1, -Os, -O2, -O3, -Ofast     struct opaque a[3]: compile error
+  -O0, -Og, -O1, -Os, -O2, -O3, -Ofast     sizeof(struct opaque): compile error
+
+Runtime: sizeof pointer to incomplete type
+  -O0, -Og, -O1, -Os, -O2, -O3, -Ofast     sizeof(struct opaque *) = 8
+```
+
+結果與最佳化等級無關——這是語言層級的型態規則，不受最佳化影響。
+
+#### 1. 為何可以只 forward declaration？
+
+C99 §6.2.5¶1 定義 incomplete type：
+
+> Types are partitioned into *object types*, *function types*, and *incomplete types* (types that describe objects but lack information needed to determine their sizes).
+
+§6.2.5¶20 允許指標指向 incomplete type：
+
+> A *pointer type* may be derived from a function type, an object type, or an **incomplete type**.
+
+`struct opaque;` 是 incomplete type，但 `struct opaque *` 是一個完整的指標型態——指標本身的大小是固定的（x86-64 上 8 bytes），不依賴 struct 的內容。因此只需 forward declaration 即可宣告並使用指標。
+
+但不能宣告 `struct opaque x;`（compiler 不知道要分配多少記憶體），也不能宣告 `struct opaque a[3];`（§6.2.5 footnote 36：array of incomplete type cannot be constructed），也不能 `sizeof(struct opaque)`（大小未知）。
+
+#### 2. 這如何達成 binary compatibility？
+
+Client code 只看到 `struct opaque *`，編譯後的 binary 只包含指標操作（固定 8 bytes 的存取）。struct 的內部成員完全被隱藏在實作 `create()` 和 `destroy()` 的 library 中。
+
+當 struct 內部需要修改（新增成員、調整順序、改變大小）時，只需重新編譯 library，client code 不用重新編譯——因為 client 的 binary 從未依賴 struct 的大小或佈局，只依賴指標大小。這就是 binary compatibility。
+
+Linux 核心中大量使用這個模式，例如 `struct file`、`struct inode` 等對 userspace 暴露的型態，都透過指標操作而非直接存取成員。
+
+#### 3. 為何 incomplete type 只能搭配 pointer？
+
+因為 incomplete type 缺少「確定大小」的資訊（§6.2.5¶1）。要分配記憶體（宣告變數、建立陣列）或計算大小（`sizeof`），compiler 必須知道型態的完整定義。唯一不需要知道大小的操作就是「存一個位址」——而指標的大小由架構決定，與所指向的型態無關。
