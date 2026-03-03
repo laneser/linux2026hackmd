@@ -1125,3 +1125,35 @@ automatic storage duration 的 lifetime 規則定義於 §6.2.4¶5：
 §6.2.4¶2 已經規定「在 lifetime 外存取 object 是 UB」，但規格額外加上這句話，是因為它針對的不是 dereference，而是**指標本身的值**。一個指向 lifetime 已結束之 object 的指標，其值是 indeterminate——即使不 dereference，僅僅比較或複製該指標，行為也是未定義的。
 
 規格之所以特別強調這一點，是因為實務上 stack 記憶體可能尚未被覆寫，指標「看起來」仍然有效。但 C 語言的語意模型中，lifetime 結束就是結束，與底層記憶體是否已被回收無關。編譯器在最佳化時可以依據此規則，假設程式不會持有指向已結束 lifetime 之 object 的指標，進而產生出乎預期的結果。
+
+### `sizeof` 對 array 與 pointer 的差異
+
+- [ ] 以下程式的輸出為何？ `int a[3] = {1,2,3}; int *p = a; printf("%zu %zu\n", sizeof(a), sizeof(p));`
+
+輸出為 `12 8`（以 `gcc -std=c99 -Wall` 編譯執行驗證）。`sizeof(a)` 量的是陣列本身的大小（3 × 4 = 12 bytes），`sizeof(p)` 量的是指標變數本身的大小（x86-64 上為 8 bytes）。
+
+#### 1. 為何 array 在 expression 中會 decay 成 pointer，但在 `sizeof` 中不會？
+
+C99 §6.3.2.1¶3：
+
+> Except when it is the operand of the **`sizeof`** operator or the unary **`&`** operator, or is a string literal used to initialize an array, an expression that has type "array of *type*" is converted to an expression with type "pointer to *type*" that points to the initial element of the array object and is not an lvalue.
+
+規格以「Except」明確列出三個例外：`sizeof`、`&`、以及用來初始化陣列的字串常量。在這三個情境中，array 保留原本的型態不做轉換。因此 `sizeof(a)` 中的 `a` 維持 `int [3]` 型態，算出 3 × `sizeof(int)` = 12；而 `int *p = a;` 中的 `a` 不在例外清單內，decay 為 `int *`，`sizeof(p)` 量的是指標本身 = 8。
+
+#### 2. 為何 `&a` 與 `a` 的值相同但型態不同？
+
+`a` 在一般 expression 中 decay 為 `int *`（§6.3.2.1¶3），指向陣列的第一個元素。
+
+`&a` 中的 `a` 是 `&` 運算子的運算元——同樣被 §6.3.2.1¶3 的 "Except" 排除，不做 decay，保留 `int [3]` 型態。再依 §6.5.3.2¶3：
+
+> The unary `&` operator yields the address of its operand. If the operand has type "*type*", the result has type "pointer to *type*".
+
+運算元型態為 `int [3]`，所以 `&a` 的型態是 `int (*)[3]`（指向整個陣列的指標）。
+
+兩者的數值相同（都是陣列起始位址），但型態不同，差異體現在 pointer arithmetic 上：
+
+- `a + 1`（`int *`）→ 前進 `sizeof(int)` = 4 bytes，指向 `a[1]`
+- `&a + 1`（`int (*)[3]`）→ 前進 `sizeof(int [3])` = 12 bytes，指向整個陣列之後
+
+#### 3. 用 Graphviz 繪製記憶體示意圖說明以上
+![sizeof_memory](https://hackmd.io/_uploads/SyRvcLEK-g.svg)
