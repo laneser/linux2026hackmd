@@ -1259,3 +1259,56 @@ C99 §6.5.2.2¶4：
 - `int **p` — 一個指標，指向 `int *`
 
 兩者都是一個指標變數，差別只在所指向的型態。此外「雙指標」也容易與 `double *`（指向 `double` 的指標）混淆。精確的說法應為「指標的指標」（pointer to pointer）。
+
+### Function designator 的轉換規則
+
+- [ ] 解釋為何以下程式合法： `int main() { return (********puts)("Hello"); }`
+
+`(********puts)("Hello")` 對 `puts` 做了 8 次 dereference 後呼叫，程式合法且行為與 `puts("Hello")` 完全相同。原因在於 function designator 與 function pointer 之間的自動轉換規則。
+
+撰寫 [`func_designator.c`](https://github.com/laneser/warmup/blob/main/func_designator.c) 驗證（`make func_designator_report`）：
+
+```
+puts        = 0x73a16094dbe0
+*puts       = 0x73a16094dbe0
+&puts       = 0x73a16094dbe0
+********puts= 0x73a16094dbe0
+fp          = 0x73a16094dbe0
+*fp         = 0x73a16094dbe0
+&fp         = 0x7ffdb0d4d640
+```
+
+`puts`、`*puts`、`&puts`、`********puts` 全部是同一個位址。唯一不同的是 `&fp`——取的是 function pointer **變數**的位址，而非函式的位址。
+
+#### 1. 依據 C99 6.3.2.1 說明 function designator 的轉換規則
+
+C99 §6.3.2.1¶4：
+
+> A function designator is an expression that has function type. Except when it is the operand of the `sizeof` operator or the unary `&` operator, a function designator with type "function returning *type*" is converted to an expression that has type "pointer to function returning *type*".
+
+`puts` 是 function designator，在除了 `sizeof` 和 `&` 以外的所有語境中，自動轉換為 function pointer。
+
+#### 2. 為何 `*` 的數量不影響結果？
+
+每次 `*` dereference 一個 function pointer，得到的是 function designator（function type 的 expression）。而 §6.3.2.1¶4 規定 function designator 會自動轉回 function pointer。這形成一個無限循環：
+
+1. `puts`：function designator → 自動轉成 function pointer
+2. `*puts`：dereference function pointer → 得到 function designator → 自動轉回 function pointer
+3. `**puts`：同上，再來一次
+4. 不管幾個 `*`，結果都是同一個 function pointer
+
+最終 `()` 呼叫運算子作用在 function pointer 上，完成函式呼叫。C 語言中所有的函式呼叫，底層都是 `()` 作用在 function pointer 上——即使寫 `puts("Hello")`，`puts` 也是先自動轉成 function pointer 再呼叫。
+
+#### 3. 若對 function pointer 使用 `&` 會發生什麼？
+
+需要區分對象是 function designator 還是 function pointer 變數：
+
+**對 function designator（如 `puts`）使用 `&`：**
+
+`&` 是 §6.3.2.1¶4 中的例外，`puts` 不做自動轉換，保留 function type。§6.5.3.2¶3 規定 `&` 取其位址，得到 function pointer。值與 `puts` 自動轉換的結果相同。
+
+**對 function pointer 變數（如 `fp`）使用 `&`：**
+
+`fp` 是一個普通的指標變數，`&fp` 取的是該變數在 stack 上的位址，型態為 `int (**)(const char *)`（pointer to function pointer）。值不同於 `fp`，多了一層 indirection。
+
+驗證結果中 `&puts` = `0x...dbe0`（函式位址），而 `&fp` = `0x...d640`（變數位址），兩者不同。
