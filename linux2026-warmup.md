@@ -1157,3 +1157,67 @@ C99 §6.3.2.1¶3：
 
 #### 3. 用 Graphviz 繪製記憶體示意圖說明以上
 ![sizeof_memory](https://hackmd.io/_uploads/SyRvcLEK-g.svg)
+
+### Pointer arithmetic 與 strict aliasing
+
+- [ ] 分析： `double x[3]; int *p = (int *)&x[0]; printf("%d\n", *(p+1));`
+
+`x[0]` 的位址被強制轉型為 `int *` 並賦值給 `p`。`p+1` 前進 `sizeof(int)` = 4 bytes，指向 `x[0]` 的第 4~7 byte（`double` 佔 8 bytes）。`*(p+1)` 將該記憶體區段的 bit pattern 當作 `int` 印出。
+
+此外 `x[3]` 未初始化，其值為 indeterminate（§6.2.4¶5：automatic storage duration 的 object，初始值是 indeterminate），讀取 indeterminate value 本身即是未定義行為。
+
+即使將 `x[0]` 初始化，這段程式仍有更根本的問題——違反 strict aliasing rule。
+
+#### 1. 為何 pointer arithmetic 的單位取決於 type？
+
+C99 §6.5.6¶8：
+
+> When an expression that has integer type is added to or subtracted from a pointer, the result has the type of the pointer operand. If the pointer operand points to an element of an array object, and the array is large enough, the result points to an element offset from the original element such that the difference of the subscripts of the resulting and original array elements equals the integer expression.
+
+規格定義 pointer arithmetic 以「元素」為單位，而非 byte。`p+1` 是指向下一個元素，元素的大小由指標的型態決定。`int *p` 的 `p+1` 前進 `sizeof(int)` bytes，`double *p` 的 `p+1` 前進 `sizeof(double)` bytes。
+
+§6.5.6¶7 進一步指出：
+
+> a pointer to an object that is not an element of an array behaves the same as a pointer to the first element of an array of length one with the type of the object as its element type.
+
+指標與陣列在 C 語言中緊密相關，pointer arithmetic 的設計就是為了讓指標能自然地走訪陣列元素。
+
+#### 2. 這是否涉及 strict aliasing 問題？
+
+是。C99 §6.5¶7（即 strict aliasing rule）：
+
+> An object shall have its stored value accessed only by an lvalue expression that has one of the following types:
+> - a type compatible with the effective type of the object,
+> - a qualified version of a type compatible with the effective type of the object,
+> - a type that is the signed or unsigned type corresponding to the effective type of the object,
+> - a type that is the signed or unsigned type corresponding to a qualified version of the effective type of the object,
+> - an aggregate or union type that includes one of the aforementioned types among its members (including, recursively, a member of a subaggregate or contained union), or
+> - a character type.
+
+`x[0]` 的 effective type 是 `double`，但 `*(p+1)` 透過 `int` 型態的 lvalue 去存取——`int` 與 `double` 不是 compatible type，也不是對應的 signed/unsigned 版本，更不是 character type。不在允許清單內，因此是**未定義行為**。
+
+規格唯一允許的「萬用」存取型態是 **character type**（`char`、`unsigned char`、`signed char`），這也是 `memcpy` 能合法運作的原因。
+
+#### 3. 在 ARMv5 或 RISC-V 上可能出現什麼錯誤？
+
+除了 strict aliasing 造成的語言層級 UB 外，不同硬體架構對記憶體存取有不同的 alignment 要求，同一段程式在不同架構上可能產生截然不同的行為。
+
+**ARMv5**（參考 [ARM Architecture Reference Manual, DDI 0100](https://developer.arm.com/documentation/ddi0406/cb/Appendixes/ARMv4-and-ARMv5-Differences/Application-level-memory-support/Alignment)）：
+
+ARMv5 不支援 unaligned memory access。LDR 指令對非 word-aligned 位址的行為：
+
+- 硬體將位址強制對齊（`addr AND NOT 3`），讀取該對齊位址的 word，再對資料做 byte rotation（`ROR (addr AND 3) * 8`）——讀到的不是預期的資料，而是被旋轉過的值
+- 若啟用 alignment checking（SCTLR 的 A bit），直接觸發 **alignment fault**，程式收到 bus error
+
+ARMv6 之後才對大部分單一 load/store 指令支援 unaligned access（見 [ARM Architecture Reference Manual, DDI 0406, A3.2.1 Unaligned data access](https://developer.arm.com/documentation/ddi0406/c/Application-Level-Architecture/Application-Level-Memory-Model/Alignment-support/Unaligned-data-access)；LDM/STM/LDRD/STRD 在 ARMv6+ 仍要求對齊，見 [Unaligned data access restrictions in ARMv7 and ARMv6](https://developer.arm.com/documentation/ddi0406/c/Application-Level-Architecture/Application-Level-Memory-Model/Alignment-support/Unaligned-data-access-restrictions-in-ARMv7-and-ARMv6)）。
+
+**RISC-V**（參考 [RISC-V Instruction Set Manual, Privileged Architecture](https://riscv.github.io/riscv-isa-manual/snapshot/privileged/)）：
+
+RISC-V 的基本整數指令集（RV32I/RV64I）允許實作自行決定是否支援 misaligned access。Privileged spec 定義了 `mcause` 中的 exception cause：
+
+- **Load address misaligned**（cause 4）
+- **Store/AMO address misaligned**（cause 6）
+
+多數嵌入式 RISC-V 核心不支援硬體 unaligned access，會觸發 address-misaligned exception，trap 到軟體模擬處理。
+
+這題中 `p+1` 的位址是 `x` 的起始位址 + 4 bytes，對 `int`（4 bytes）而言恰好是對齊的，不會觸發 alignment fault。但若反過來——將 `char *` 強制轉為 `double *` 再 dereference，位址若不是 8 的倍數，在 ARMv5 上會讀到旋轉過的錯誤資料或直接 fault，在 RISC-V 上可能觸發 exception。
