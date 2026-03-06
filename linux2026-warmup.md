@@ -1243,11 +1243,11 @@ C99 §6.5.2.2¶4：
 
 `void func(int *p) { p = &B; }` — `p = &B` 只改了 func 的區域變數，`ptrA` 不變：
 
-![func_pointer](func_pointer.svg)
+![func_pointer](https://hackmd.io/_uploads/H1rde0dFbg.svg)
 
 `void func(int **p) { *p = &B; }` — `*p = &B` 透過 `p` 找到 `ptrA`，改變其指向：
 
-![func_double_pointer](func_double_pointer.svg)
+![func_double_pointer](https://hackmd.io/_uploads/SJu5xAdYZg.svg)
 
 #### 3. 為何「雙指標」這個說法在語意上不精確？
 
