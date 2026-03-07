@@ -1984,7 +1984,18 @@ $$C_{\text{list-sort}}(1028) \leq 1028 \times 11 - 1027 = 11308 - 1027 = 10281$$
 
 與步驟三的無延遲 worst case $C_{\text{no-delay}}(1028) = 10249$ 相比，此例差距不大。但當 $r$ 更小時差距會更顯著——$r = 1$ 時，無延遲的 $2^k$ 個元素全部多經過一層深度 $k+1$ 的合併，而延遲版本可以避免這種退化。
 
-Commit [`b5c56e0cdd62`](https://github.com/torvalds/linux/commit/b5c56e0cdd62) 引用 Panny & Prodinger (1995) 和 Chen, Hwang & Chen (1999) 的分析，以 $C(n) = n \log_2 n - K \cdot n + O(1)$ 表示（$K$ 越大，比較越少）。`list_sort` 的 2:1 平衡使 $K$ 在各種 $n$ 下穩定維持 1.207 附近，平均比無延遲版本省下約 $0.2n$ 次比較。
+**與 commit 公式的差異。** Commit [`b5c56e0cdd62`](https://github.com/torvalds/linux/commit/b5c56e0cdd62) 引用 Panny & Prodinger (1995) 和 Chen, Hwang & Chen (1999) 的分析，將比較次數表示為：
+
+$$C(n) = n \log_2 n - K \cdot n + O(1)$$
+
+$K$ 越大，比較越少。文獻分析得出 `list_sort` 的 $K \approx 1.207$。
+
+前述推導的上界與此公式有兩處差異，使得該上界正確但不夠緊：
+
+1. **$\lceil \log_2 n \rceil$ vs $\log_2 n$**：合併樹的層數必須是整數，所以前述推導用了上取整。但 $n$ 略超 $2^k$ 時，$\lceil \log_2 n \rceil = k + 1$ 遠大於 $\log_2 n \approx k$，使上界一口氣多了近 $n$ 次比較。實際上合併樹不需要每個元素都經過 $k+1$ 層——延遲規則讓大部分元素只經過 $k$ 層，只有少數元素到第 $k+1$ 層。
+2. **每次 merge 都假設 worst case**：前述推導對每次 `merge()` 都用 $a + b - 1$（兩邊完全交錯），但整棵合併樹中不可能每次合併都同時達到 worst case。文獻的分析考慮了合併樹結構對各層比較次數的約束，得出更精確的 $K$ 值。
+
+換算成 $K$ 值，前述上界在 $n = 2^k$ 時對應 $K = 1$（精確），但 $n$ 略超 $2^k$ 時 $K$ 接近 $0$（非常寬鬆）。而 `list_sort` 的實際 $K$ 穩定在 $1.207$ 附近，平均比無延遲版本省下約 $0.2n$ 次比較。
 
 ---
 
