@@ -1825,6 +1825,72 @@ Linus 分析了兩個具體原因：
 
 核心的 `prefetch()` 基礎設施（[`include/linux/prefetch.h`](https://github.com/torvalds/linux/blob/v6.19/include/linux/prefetch.h)）仍然存在，供確知存取模式有利的呼叫端自行使用——但通用的 list iteration 巨集不再隱式 prefetch。
 
+### Linux 的 merge sort 設計
+
+- [ ] 針對 Linux 的 merge sort 設計，回答
+    1. 為何 list_sort 是 stable？
+    2. 為何不使用 quicksort？
+    3. 為何 merge sort 適合 linked list？
+
+Linux 核心的排序實作位於 [`lib/list_sort.c`](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c)，採用 merge sort 變體。以下逐一回答三個子題。
+
+#### 1. 為何 `list_sort` 是 stable
+
+Stable sort 的定義：若兩元素的比較結果相等（`cmp(a, b) == 0`），排序後它們的相對順序與排序前相同。
+
+`list_sort` 的穩定性由 `merge()` 函式保證（[第 19–20 行](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c#L19)）：
+
+```c
+/* if equal, take 'a' -- important for sort stability */
+if (cmp(priv, a, b) <= 0) {
+```
+
+當 `cmp` 回傳 `0`（相等）時，取第一引數 `a` 的元素。若 `a` 的元素在原始序列中都先於 `b` 的元素，這就保證等值元素的相對順序不變。
+
+`list_sort` 內部所有合併——無論來自哪個階段——都透過 `merge()` 或 `merge_final()` 執行，兩者採用相同的 `<= 0` 取左邏輯（[第 19–20 行](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c#L19)、[第 56–57 行](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c#L56)）。以下先建立引理，再對 `list_sort` 的三個階段逐一驗證。
+
+**引理（Merge Lemma）：** 若 `merge(a, b)` 的兩個輸入各自已穩定，且 `a` 的所有元素在原始序列中都先於 `b` 的所有元素，則輸出也是穩定的。
+
+> 證明：考慮任意等值對 $a_i, a_j$（$i < j$ 表示原始順序）：
+> - **都在 $a$** → $a$ 已穩定，merge 不改變同一子串列內的相對順序 ✓
+> - **都在 $b$** → 同理 ✓
+> - **$a_i \in a, a_j \in b$** → `cmp` 回傳 `<= 0` 時取 $a$，$a_i$ 排在 $a_j$ 前 ✓
+> - **$a_i \in b, a_j \in a$** → 不可能，因為 $a$ 的元素全部先於 $b$ 而 $i < j$
+>
+> 四種情況皆滿足。$\blacksquare$
+
+**「第一引數較早」不變量。** 引理的前提要求第一引數包含原始序列中較早的元素。`list_sort` 的三個階段都滿足此條件：
+
+1. **do-while 迴圈**（[第 218–241 行](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c#L218)）：元素逐一從輸入取出，prepend 到 pending 前端，因此 pending 中越靠前的子串列，其元素在原始序列中越**晚**。合併時（[第 227–229 行](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c#L227)），`a = *tail`（較晚），`b = a->prev`（較早），呼叫 `merge(b, a)` — 較早的 `b` 為第一引數 ✓
+2. **for 迴圈**（[第 246–253 行](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c#L246)）：`list` 從 pending 前端開始（最晚），`pending` 往 `prev` 走（較早）。呼叫 `merge(pending, list)` — 較早的 `pending` 為第一引數 ✓
+3. **merge_final**（[第 255 行](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c#L255)）：`pending` 是最後剩餘的最舊子串列，`list` 是較新元素的累積結果。呼叫 `merge_final(pending, list)` — 較早的 `pending` 為第一引數 ✓
+
+**歸納證明：** 令 $P(k)$ 為命題：在第 $k$ 次合併操作完成後，所有已排序的子串列都維持穩定性。
+
+**基底 $P(0)$：** 尚未執行任何合併。`list_sort` 在[第 194 行](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c#L194)處理零或一個元素的情況（直接 return）；其餘情況，每個元素被取出為長度 1 的子串列（[第 235–240 行](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c#L235)），單一元素不存在等值對，穩定性自明。$P(0)$ 成立。
+
+**歸納步驟：** 假設 $P(k)$ 成立。第 $k+1$ 次合併的兩個輸入子串列各自已穩定（由 $P(k)$），且如上所述滿足「第一引數較早」不變量。由引理，合併結果穩定。$P(k+1)$ 成立。
+
+由數學歸納法，$P(k)$ 對所有 $k \geq 0$ 成立。最終的 `merge_final()` 是最後一次合併操作，同樣滿足引理前提，故 `list_sort` 的輸出是穩定的。$\blacksquare$
+
+#### 2. 為何不使用 quicksort
+
+Quicksort 不適合 linked list 有三個原因：
+
+**（a）pivot 選取需要隨機存取。** Quicksort 的效能高度仰賴 pivot 的選取品質。在 array 中，可用 O(1) 取得中間元素（median-of-three）作為 pivot；linked list 必須循序走訪才能到達中間節點，光是選 pivot 就要 O(n)。
+
+**（b）Quicksort 不是 stable sort。** Partition 過程中，等值元素可能因交換而改變相對順序。核心的 `list_sort` 文件明確要求穩定性（[第 108 行](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c#L108)：「list_sort is a stable sort」），quicksort 無法滿足。
+
+**（c）worst case O(n²)。** 核心程式碼不能接受不可預測的效能退化。Merge sort 保證 worst case O(n log n)。
+
+#### 3. 為何 merge sort 適合 linked list
+
+**不需隨機存取。** Merge sort 的兩個核心操作——分割與合併——都只需循序走訪。分割可透過逐一取出元素完成（`list_sort` 的做法），合併則是比較兩個串列的頭部元素並重新串接指標。這與 linked list 的循序存取特性天然吻合。
+
+**不需額外 O(n) 空間。** Array 的 merge sort 需要 O(n) 暫存空間來存放合併結果；linked list 的合併只需改變 `next` 指標，就地（in-place）完成，空間複雜度 O(log n)（遞迴堆疊或 pending list 的開銷）。
+
+**穩定且 worst case O(n log n)。** 如上所述，merge sort 天然支持穩定性，且不論輸入分佈如何都保證 O(n log n)，適合核心中效能需求可預測的場景。
+
 ---
 
 ## 參考資料
