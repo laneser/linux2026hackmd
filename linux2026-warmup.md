@@ -1976,11 +1976,11 @@ if (likely(bits)) {
 
 2:1 平衡保證使合併樹深度不超過 $\lceil \log_2 n \rceil$，每個元素最多經過 $\lceil \log_2 n \rceil$ 層合併。代入公式：
 
-$$C_{\text{list\_sort}}(n) \leq n \lceil \log_2 n \rceil - (n - 1) \leq n \lceil \log_2 n \rceil - n + 1$$
+$$C_{\text{list-sort}}(n) \leq n \lceil \log_2 n \rceil - (n - 1) \leq n \lceil \log_2 n \rceil - n + 1$$
 
 以 $n = 1028$ 比較延遲前後的差異：
 
-$$C_{\text{list\_sort}}(1028) \leq 1028 \times 11 - 1027 = 11308 - 1027 = 10281$$
+$$C_{\text{list-sort}}(1028) \leq 1028 \times 11 - 1027 = 11308 - 1027 = 10281$$
 
 與步驟三的無延遲 worst case $C_{\text{no-delay}}(1028) = 10249$ 相比，此例差距不大。但當 $r$ 更小時差距會更顯著——$r = 1$ 時，無延遲的 $2^k$ 個元素全部多經過一層深度 $k+1$ 的合併，而延遲版本可以避免這種退化。
 
