@@ -1891,6 +1891,101 @@ Quicksort 不適合 linked list 有三個原因：
 
 **穩定且 worst case O(n log n)。** 如上所述，merge sort 天然支持穩定性，且不論輸入分佈如何都保證 O(n log n)，適合核心中效能需求可預測的場景。
 
+### `list_sort` 的延遲合併與比較次數分析
+
+- [ ] Linux 核心的 `list_sort` 建構方式不同於 fully-eager bottom-up mergesort，回答
+    * 推導 worst-case comparison 次數
+    * 說明為何延遲合併可降低比較次數
+    * 建立數學上界
+
+#### 1. 從 `merge()` 推導單次合併的比較次數
+
+設 `merge()` 的兩個輸入子串列長度分別為 $a$ 和 $b$。觀察其迴圈結構（[第 18–37 行](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c#L18)）：每次迭代做恰好 1 次 `cmp()` 比較，從兩個子串列之一取出 1 個元素；當某一邊耗盡（`next` 為 NULL）時，另一邊剩餘元素**不經比較**直接接上。因此比較次數等於迴圈執行次數，即透過比較取出的元素數。
+
+- **Worst case：** 兩邊交錯取出，直到第 $a + b - 1$ 個元素取出時某邊歸零，最後 1 個元素直接接上。比較 $a + b - 1$ 次。
+- **Best case：** 較短的子串列中所有元素都小於較長子串列的任何元素，較短邊先耗盡。比較 $\min(a, b)$ 次。
+
+#### 2. 建立合併樹模型與 $n = 2^k$ 時的 worst case
+
+排序 $n$ 個元素需要多次合併，可將整個過程視為一棵**合併樹**（二元樹）：$n$ 個元素為葉節點，每個內部節點代表一次 `merge()` 呼叫。
+
+每次 `merge()` 將 2 個子串列合成 1 個，即每次呼叫減少 1 個子串列。起始有 $n$ 個子串列（每個元素各自一個），最終合成 1 個，因此不論合併順序如何，`merge()` 的呼叫次數固定為 $n - 1$ 次。延遲合併機制只改變合併的時機和順序（即合併樹的形狀），不改變呼叫次數。
+
+每個元素從葉節點到根，每經過一層合併就在 worst case 貢獻一次比較（對應 $a + b$ 的部分），而每次 `merge()` 呼叫有一個 $-1$ 的折扣（最後一個元素直接接上不需比較）。因此：
+
+$$C_{\text{worst}}(n) = \sum_{i} d_i - (n - 1)$$
+
+其中 $d_i$ 是元素 $i$ 在合併樹中的深度，$n - 1$ 是 merge 呼叫的總次數。合併樹的形狀決定 $\sum d_i$ 的大小——**樹越深，$\sum d_i$ 越大，worst case 比較次數越多**。
+
+**$n = 2^k$ 時**，合併樹完美平衡。以 $n = 8$（$k = 3$）為例，合併樹由下往上編號：
+
+```
+層 j=2:  [1,2,3,4,5,6,7,8]          ← 1 次 merge（合併兩個 size-4）
+層 j=1:  [1,2,3,4]  [5,6,7,8]       ← 2 次 merge（合併兩個 size-2）
+層 j=0:  [1,2] [3,4] [5,6] [7,8]    ← 4 次 merge（合併兩個 size-1）
+葉節點:   1  2   3  4   5  6   7  8
+```
+
+第 $j$ 層把大小 $2^j$ 的子串列兩兩合併成長度 $2^{j+1}$ 的子串列，共 $\frac{n}{2^{j+1}}$ 次 merge，每次 worst case $2^{j+1} - 1$ 次比較，第 $j$ 層總比較 $\frac{n}{2^{j+1}} \cdot (2^{j+1} - 1) = n - \frac{n}{2^{j+1}}$。
+
+每個元素經過 $k$ 層（從葉到根），所以 $\sum d_i = kn$。對所有層求和：
+
+$$C(2^k) = \sum_{j=0}^{k-1} \left(n - \frac{n}{2^{j+1}}\right) = kn - n\left(1 - \frac{1}{2^k}\right) = kn - n + 1$$
+
+即 $C(2^k) = n \log_2 n - n + 1$。
+
+#### 3. $n \neq 2^k$ 時：不平衡合併樹的 worst case
+
+$n \neq 2^k$ 時，合併樹無法完美平衡，worst case 取決於樹的形狀。不做延遲時，do-while 迴圈結束後 pending 中殘留的子串列大小不等，清掃階段（[for 迴圈，第 246–253 行](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c#L246)）的合併可能嚴重不平衡。
+
+以 $n = 2^k + r$（$0 < r \ll 2^k$）為例。不做延遲時，pending 中會有一個大小 $2^k$ 的子串列和若干小子串列（總大小 $r$），清掃時的最終合併是 $2^k : r$。此時合併樹中：
+
+- $2^k$ 個元素深度 $k + 1$（$k$ 層平衡合併 + 1 層最終合併）
+- $r$ 個元素深度 $\lceil \log_2 r \rceil + 1$（自身排序 + 最終合併）
+
+$$C_{\text{no-delay}}(n) = 2^k(k+1) + r(\lceil \log_2 r \rceil + 1) - (n - 1)$$
+
+以 commit [`b5c56e0cdd62`](https://github.com/torvalds/linux/commit/b5c56e0cdd62) 的 $n = 1028$（$2^{10} + 4$）為例：
+
+$$C_{\text{no-delay}}(1028) = 1024 \times 11 + 4 \times 3 - 1027 = 11276 - 1027 = 10249$$
+
+#### 4. 延遲合併規則如何保證 2:1
+
+`list_sort` 的 do-while 迴圈（[第 218–241 行](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c#L218)）每次迭代從輸入取出一個元素加入 pending，並透過 `count` 的位元操作決定是否觸發合併：
+
+```c
+for (bits = count; bits & 1; bits >>= 1)
+    tail = &(*tail)->prev;
+if (likely(bits)) {
+    struct list_head *a = *tail, *b = a->prev;
+    a = merge(priv, cmp, b, a);
+    a->prev = b->prev;
+    *tail = a;
+}
+```
+
+合併只在 `bits` 非零時發生，即 `count` 達到 $2^k$ 的**奇數倍**（$3 \cdot 2^k, 5 \cdot 2^k, \ldots$）。若 `count` 首次達到 $2^k$（如 `0b0011` → `0b0100`），`bits` 右移後為零，`likely(bits)` 為假，**跳過合併**——這就是延遲。要等到 $3 \cdot 2^k$（確認後面已有 $2^k$ 個元素）才真正合併。
+
+換言之，延遲規則是（[第 133–135 行](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c#L133)註解）：
+
+> 延遲合併兩個大小 $2^k$ 的子串列，直到後面已經累積了 $2^k$ 個元素。
+
+這保證到達輸入尾端、開始清掃 pending lists 時，每次合併**最差是 2:1 的比例**。最差情況是某個大小 $2^k$ 的子串列後面恰有 $2^{k+1} - 1$ 個元素（不足以觸發下一層合併），此時比例為 $2^k : (2^{k+1} - 1) \approx 1:2$。
+
+#### 5. 建立 `list_sort` 的數學上界
+
+2:1 平衡保證使合併樹深度不超過 $\lceil \log_2 n \rceil$，每個元素最多經過 $\lceil \log_2 n \rceil$ 層合併。代入公式：
+
+$$C_{\text{list\_sort}}(n) \leq n \lceil \log_2 n \rceil - (n - 1) \leq n \lceil \log_2 n \rceil - n + 1$$
+
+以 $n = 1028$ 比較延遲前後的差異：
+
+$$C_{\text{list\_sort}}(1028) \leq 1028 \times 11 - 1027 = 11308 - 1027 = 10281$$
+
+與步驟三的無延遲 worst case $C_{\text{no-delay}}(1028) = 10249$ 相比，此例差距不大。但當 $r$ 更小時差距會更顯著——$r = 1$ 時，無延遲的 $2^k$ 個元素全部多經過一層深度 $k+1$ 的合併，而延遲版本可以避免這種退化。
+
+Commit [`b5c56e0cdd62`](https://github.com/torvalds/linux/commit/b5c56e0cdd62) 引用 Panny & Prodinger (1995) 和 Chen, Hwang & Chen (1999) 的分析，以 $C(n) = n \log_2 n - K \cdot n + O(1)$ 表示（$K$ 越大，比較越少）。`list_sort` 的 2:1 平衡使 $K$ 在各種 $n$ 下穩定維持 1.207 附近，平均比無延遲版本省下約 $0.2n$ 次比較。
+
 ---
 
 ## 參考資料
