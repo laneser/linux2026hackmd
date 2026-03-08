@@ -2183,16 +2183,16 @@ Linux 核心常用結構體多數 $\geq 128$ bytes（見上方 slabinfo 表格�
 
 結論並非「陣列永遠比鏈結串列快」，而是取決於 $(n, i, s)$ 三者的組合。小元素 + 已知位置（如 tail pointer）時陣列佔優；大結構體 + 非尾部插入時鏈結串列更快。鏈結串列的另一優勢在於**結構特性**：插入刪除不影響其他元素的位址（不會使指標失效）、不需要連續記憶體區塊。選擇資料結構時，應根據 $(n, i, s)$ 的具體組合，而非僅看漸近複雜度。
 
-## 鏈結串列歷屆測驗分析
+### 鏈結串列歷屆測驗分析
 
 - [ ] 逐一分析[第一週教材列出](https://wiki.csie.ncku.edu.tw/linux/schedule)的**題目 1** 到**題目 7**，確認理解題目且充分作答，並指出參考題解的錯誤和待改進之處
 
-### 題目 1
+#### 題目 1
 
 > 題目：[Linked List 練習題](https://hackmd.io/@sysprog/linked-list-quiz)（含分析）
 > 參考題解：[LinYunWen/c-review (week4)](https://github.com/LinYunWen/c-review/tree/master/week4)
 
-#### Q1：環狀雙向鏈結串列（FuncA/FuncB/FuncC）
+##### Q1：環狀雙向鏈結串列（FuncA/FuncB/FuncC）
 
 題目給定環狀雙向鏈結串列（circular doubly-linked list）的結構與三個操作函式，要求推敲其功能並預測執行結果：
 
@@ -2203,7 +2203,7 @@ struct node {
 };
 ```
 
-##### 作答
+**作答**
 
 **FuncA**：在串列尾端插入新節點。開頭的 `if (!*start)` 處理空串列情況（新節點的 `next` 和 `prev` 皆指向自身）；非空時，透過 `(*start)->prev` 取得尾節點 `last`，將新節點接在 `last` 之後、`*start` 之前，維持環狀結構。`*start` 不變，故新節點成為尾節點。
 
@@ -2228,7 +2228,7 @@ FuncC(&start, 63, 51);       // start → 48 → 51 → 63 → 72 → 86
 - Bubble sort：需要 swap 函式（交換兩節點的資料或位置）
 - Merge sort：需要 split 函式（將串列分成兩半）和 merge 函式（合併兩個已排序串列）
 
-##### 題目程式碼與參考實作的改進建議
+**題目程式碼與參考實作的改進建議**
 
 參考題解的作答（FuncA/FuncB/FuncC 的功能推敲與執行結果預測）正確。以下針對題目程式碼及 [bubble sort 參考實作](https://github.com/LinYunWen/c-review/blob/master/week4/bubble_sort.c)提出 5 項改進建議。
 
@@ -2308,7 +2308,7 @@ void bubble_sort(struct node **start, int length) {
 
 `left` 和 `right` 在 `for (int i = ...)` 之前初始化，但每輪外層迴圈結束後未重設回起點。第二輪開始時，走訪從上一輪結束的位置繼續，導致排序結果錯誤。
 
-##### 建議版本
+**建議版本**
 
 修正後的完整實作（交換資料 + 每輪重設起點）：
 
@@ -2329,7 +2329,7 @@ void bubble_sort(struct node **start, int length)
 }
 ```
 
-##### 測試驗證
+**測試驗證**
 
 使用 [Unity](https://github.com/ThrowTheSwitch/Unity) C 測試框架，對相同的 10 個測試案例分別執行原始版本和建議版本。原始版本使用 `fork()` 隔離執行以捕捉 segfault 和無限迴圈：
 
