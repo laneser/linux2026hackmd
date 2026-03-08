@@ -2183,14 +2183,14 @@ Linux 核心常用結構體多數 $\geq 128$ bytes（見上方 slabinfo 表格�
 
 結論並非「陣列永遠比鏈結串列快」，而是取決於 $(n, i, s)$ 三者的組合。小元素 + 已知位置（如 tail pointer）時陣列佔優；大結構體 + 非尾部插入時鏈結串列更快。鏈結串列的另一優勢在於**結構特性**：插入刪除不影響其他元素的位址（不會使指標失效）、不需要連續記憶體區塊。選擇資料結構時，應根據 $(n, i, s)$ 的具體組合，而非僅看漸近複雜度。
 
-## 鏈結串列歷屆測驗分析
+## 逐一分析[第一週教材列出](https://wiki.csie.ncku.edu.tw/linux/schedule)的題目 1 到題目 7，確認理解題目且充分作答，並指出參考題解的錯誤和待改進之處
 
-課程要求逐一分析[第一週教材列出](https://wiki.csie.ncku.edu.tw/linux/schedule)的題目 1 到題目 7，確認理解題目且充分作答，並指出參考題解的錯誤和待改進之處。
+### 題目 1
 
-### 題目 1：2018q1 quiz4 Q1（環狀雙向鏈結串列）
-
-> 原始題目：[Linked List 練習題](https://hackmd.io/@sysprog/linked-list-quiz)
+> 題目：[Linked List 練習題](https://hackmd.io/@sysprog/linked-list-quiz)（含分析）
 > 參考題解：[LinYunWen/c-review (week4)](https://github.com/LinYunWen/c-review/tree/master/week4)
+
+#### Q1：環狀雙向鏈結串列（FuncA/FuncB/FuncC）
 
 題目給定環狀雙向鏈結串列（circular doubly-linked list）的結構與三個操作函式，要求推敲其功能並預測執行結果：
 
@@ -2201,7 +2201,7 @@ struct node {
 };
 ```
 
-#### 作答
+##### 作答
 
 **FuncA**：在串列尾端插入新節點。開頭的 `if (!*start)` 處理空串列情況（新節點的 `next` 和 `prev` 皆指向自身）；非空時，透過 `(*start)->prev` 取得尾節點 `last`，將新節點接在 `last` 之後、`*start` 之前，維持環狀結構。`*start` 不變，故新節點成為尾節點。
 
@@ -2226,11 +2226,11 @@ FuncC(&start, 63, 51);       // start → 48 → 51 → 63 → 72 → 86
 - Bubble sort：需要 swap 函式（交換兩節點的資料或位置）
 - Merge sort：需要 split 函式（將串列分成兩半）和 merge 函式（合併兩個已排序串列）
 
-#### 題目程式碼與參考實作的改進建議
+##### 題目程式碼與參考實作的改進建議
 
 參考題解的作答（FuncA/FuncB/FuncC 的功能推敲與執行結果預測）正確。以下針對題目程式碼及 [bubble sort 參考實作](https://github.com/LinYunWen/c-review/blob/master/week4/bubble_sort.c)提出 5 項改進建議。
 
-##### 建議 1：FuncB 應加入空串列防護
+**建議 1：FuncB 應加入空串列防護**
 
 ```c
 void FuncB(struct node **start, int value) {
@@ -2239,7 +2239,7 @@ void FuncB(struct node **start, int value) {
 
 第一行直接解引用 `(*start)->prev`，當 `*start == NULL` 時觸發 segmentation fault。FuncA 有 `if (!*start)` 的防護，FuncB 卻沒有。
 
-##### 建議 2：FuncC 應加入空串列防護
+**建議 2：FuncC 應加入空串列防護**
 
 ```c
 void FuncC(struct node **start, int value1, int value2) {
@@ -2251,7 +2251,7 @@ void FuncC(struct node **start, int value1, int value2) {
 
 與 FuncB 相同的問題——`*start == NULL` 時直接解引用 `temp->data` 導致 segfault。
 
-##### 建議 3：FuncC 應處理目標值不存在的情況
+**建議 3：FuncC 應處理目標值不存在的情況**
 
 ```c
     while (temp->data != value2)
@@ -2260,7 +2260,7 @@ void FuncC(struct node **start, int value1, int value2) {
 
 環狀串列沒有 `NULL` 終止條件。若 `value2` 不存在於串列中，`while` 迴圈會無限走訪。應改用 `do { ... } while (temp != *start)` 並在迴圈結束後檢查是否找到目標。
 
-##### 建議 4：exchange() 應改為交換資料
+**建議 4：exchange() 應改為交換資料**
 
 ```c
 void exchange(struct node **left, struct node **right) {
@@ -2287,7 +2287,7 @@ if (cur->data > cur->next->data) {
 
 交換資料的時間複雜度為 $O(1)$ 且不涉及指標操作，不會破壞串列結構。
 
-##### 建議 5：bubble_sort() 應在每輪外層迴圈重設走訪起點
+**建議 5：bubble_sort() 應在每輪外層迴圈重設走訪起點**
 
 ```c
 void bubble_sort(struct node **start, int length) {
@@ -2359,7 +2359,7 @@ test_bubble_sort_duplicates:FAIL: assertion failed
 10 Tests 7 Failures 0 Ignored
 ```
 
-測試程式碼：[quiz_linked_list/q1/](https://github.com/laneser/linuxkernel2026/tree/main/homework/warmup/quiz_linked_list/q1)。測試函式透過全域函式指標（`impl_FuncB`、`impl_FuncC`、`impl_bubble_sort`）呼叫實作，原始版本和建議版本共用相同的 10 個測試函式，僅在 `main()` 中綁定不同的實作。
+測試程式碼：[quiz_linked_list/q1/](https://github.com/laneser/warmup/tree/main/quiz_linked_list/q1)。測試函式透過全域函式指標（`impl_FuncB`、`impl_FuncC`、`impl_bubble_sort`）呼叫實作，原始版本和建議版本共用相同的 10 個測試函式，僅在 `main()` 中綁定不同的實作。
 
 ---
 
