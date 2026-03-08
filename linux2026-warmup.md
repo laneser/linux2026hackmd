@@ -2226,11 +2226,11 @@ FuncC(&start, 63, 51);       // start → 48 → 51 → 63 → 72 → 86
 - Bubble sort：需要 swap 函式（交換兩節點的資料或位置）
 - Merge sort：需要 split 函式（將串列分成兩半）和 merge 函式（合併兩個已排序串列）
 
-#### 參考題解的錯誤與改進
+#### 題目程式碼與參考實作的改進建議
 
-參考題解的作答（FuncA/FuncB/FuncC 的功能推敲與執行結果預測）正確。以下針對延伸題的 [bubble sort 參考實作](https://github.com/LinYunWen/c-review/blob/master/week4/bubble_sort.c)指出 5 個錯誤。
+參考題解的作答（FuncA/FuncB/FuncC 的功能推敲與執行結果預測）正確。以下針對題目程式碼及 [bubble sort 參考實作](https://github.com/LinYunWen/c-review/blob/master/week4/bubble_sort.c)提出 5 項改進建議。
 
-##### 錯誤 1：FuncB 缺少空串列防護
+##### 建議 1：FuncB 應加入空串列防護
 
 ```c
 void FuncB(struct node **start, int value) {
@@ -2239,7 +2239,7 @@ void FuncB(struct node **start, int value) {
 
 第一行直接解引用 `(*start)->prev`，當 `*start == NULL` 時觸發 segmentation fault。FuncA 有 `if (!*start)` 的防護，FuncB 卻沒有。
 
-##### 錯誤 2：FuncC 缺少空串列防護
+##### 建議 2：FuncC 應加入空串列防護
 
 ```c
 void FuncC(struct node **start, int value1, int value2) {
@@ -2251,7 +2251,7 @@ void FuncC(struct node **start, int value1, int value2) {
 
 與 FuncB 相同的問題——`*start == NULL` 時直接解引用 `temp->data` 導致 segfault。
 
-##### 錯誤 3：FuncC 在找不到目標值時無限迴圈
+##### 建議 3：FuncC 應處理目標值不存在的情況
 
 ```c
     while (temp->data != value2)
@@ -2260,7 +2260,7 @@ void FuncC(struct node **start, int value1, int value2) {
 
 環狀串列沒有 `NULL` 終止條件。若 `value2` 不存在於串列中，`while` 迴圈會無限走訪。應改用 `do { ... } while (temp != *start)` 並在迴圈結束後檢查是否找到目標。
 
-##### 錯誤 4：exchange() 指標操作不完整
+##### 建議 4：exchange() 應改為交換資料
 
 ```c
 void exchange(struct node **left, struct node **right) {
@@ -2287,7 +2287,7 @@ if (cur->data > cur->next->data) {
 
 交換資料的時間複雜度為 $O(1)$ 且不涉及指標操作，不會破壞串列結構。
 
-##### 錯誤 5：bubble_sort() 未在每輪外層迴圈重設走訪起點
+##### 建議 5：bubble_sort() 應在每輪外層迴圈重設走訪起點
 
 ```c
 void bubble_sort(struct node **start, int length) {
@@ -2306,7 +2306,7 @@ void bubble_sort(struct node **start, int length) {
 
 `left` 和 `right` 在 `for (int i = ...)` 之前初始化，但每輪外層迴圈結束後未重設回起點。第二輪開始時，走訪從上一輪結束的位置繼續，導致排序結果錯誤。
 
-##### 修正版本
+##### 建議版本
 
 修正後的完整實作（交換資料 + 每輪重設起點）：
 
@@ -2329,10 +2329,10 @@ void bubble_sort(struct node **start, int length)
 
 ##### 測試驗證
 
-使用 [Unity](https://github.com/ThrowTheSwitch/Unity) C 測試框架，對相同的 10 個測試案例分別執行 buggy 版和修正版。Buggy 版使用 `fork()` 隔離執行以捕捉 segfault 和無限迴圈：
+使用 [Unity](https://github.com/ThrowTheSwitch/Unity) C 測試框架，對相同的 10 個測試案例分別執行原始版本和建議版本。原始版本使用 `fork()` 隔離執行以捕捉 segfault 和無限迴圈：
 
 ```
-=== Fixed version (Unity tests) ===
+=== Suggested version (Unity tests) ===
 test_FuncB_empty_list:PASS
 test_FuncB_prepend:PASS
 test_FuncC_empty_list:PASS
@@ -2345,7 +2345,7 @@ test_bubble_sort_single:PASS
 test_bubble_sort_duplicates:PASS
 10 Tests 0 Failures 0 Ignored
 
-=== Buggy version (expected failures confirm bugs) ===
+=== Original version (expected failures) ===
 test_FuncB_empty_list:FAIL: crashed (SIGSEGV)
 test_FuncB_prepend:PASS
 test_FuncC_empty_list:FAIL: crashed (SIGSEGV)
@@ -2359,7 +2359,7 @@ test_bubble_sort_duplicates:FAIL: assertion failed
 10 Tests 7 Failures 0 Ignored
 ```
 
-測試程式碼：[quiz_linked_list/q1/](https://github.com/laneser/linuxkernel2026/tree/main/homework/warmup/quiz_linked_list/q1)。測試函式透過全域函式指標（`impl_FuncB`、`impl_FuncC`、`impl_bubble_sort`）呼叫實作，buggy 版和修正版共用相同的 10 個測試函式，僅在 `main()` 中綁定不同的實作。
+測試程式碼：[quiz_linked_list/q1/](https://github.com/laneser/linuxkernel2026/tree/main/homework/warmup/quiz_linked_list/q1)。測試函式透過全域函式指標（`impl_FuncB`、`impl_FuncC`、`impl_bubble_sort`）呼叫實作，原始版本和建議版本共用相同的 10 個測試函式，僅在 `main()` 中綁定不同的實作。
 
 ---
 
