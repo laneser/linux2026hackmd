@@ -2363,6 +2363,32 @@ test_bubble_sort_duplicates:FAIL: assertion failed
 
 測試程式碼：[quiz_linked_list/q1/](https://github.com/laneser/warmup/tree/main/quiz_linked_list/q1)，在 `quiz_linked_list/` 目錄下執行 `make q1_report` 即可產出上述結果。測試函式透過全域函式指標（`impl_FuncB`、`impl_FuncC`、`impl_bubble_sort`）呼叫實作，原始版本和建議版本共用相同的 10 個測試函式，僅在 `main()` 中綁定不同的實作。
 
+##### Q2：單向鏈結串列的環偵測（FuncX）
+
+題目給定單向鏈結串列與 `FuncX`，要求推敲功能並預測 K1–K5 及 count 的輸出。
+
+**作答**
+
+題目原始碼中 `FuncX` 的迴圈本體是 `data++`，但參考題解在分析時將其改為 `(*data)++`，初讀時被參考題解誤導。回頭對照題目原始碼後才注意到：`data` 是 `int *`，`data++` 只是遞增這個 local pointer copy，`*data`（即 `count`）從未被修改。這個差異決定了 count 的最終值。
+
+`FuncX` 的實際行為：從 `head->next` 開始走訪，遇到 `NULL`（非環狀）或回到 `head`（環狀）時停止。回傳 `node - head`：環狀時 `node == head`，回傳 0；非環狀時 `node == NULL`，回傳 `NULL - head`（非零）。
+
+各輸出推導：
+
+| 輸出 | 結構變化 | FuncX 行為 | 結果 |
+|------|---------|-----------|------|
+| K1 | `head(0)→1→2→3→4→NULL` | `node` 走到 `NULL`，`return NULL - head ≠ 0` | **Yes** |
+| K2 | `node3→next = head`，形成環 `head→1→2→3→head` | `node` 走到 `head`，`return 0` | **No** |
+| K3 | `head→…→head→next = head→next`，展開後是 no-op | 同 K2 | **No** |
+| K4 | `head→next = head`（繞環 2 圈回到 `head`） | `node = head→next = head`，迴圈不執行，`return 0` | **No** |
+| K5 | `head→next→data = head→data` | — | **0** |
+| count | `data++` 從未修改 `*data` | — | **0** |
+
+**參考題解的改進建議**
+
+1. **`data++` vs `(*data)++`**：題目原始碼是 `data++`（指標遞增），但參考題解在重新貼出程式碼時改為 `(*data)++`（值遞增），導致後續 count 的分析基於錯誤的前提。以題目原始碼為準，count 應為 0。
+2. **K1 的 `return NULL - head` 是未定義行為**：C99 6.5.6§9 規定指標相減時兩個指標必須指向同一陣列物件的元素。`NULL` 減去有效指標不符合此條件。實務上多數平台得到非零值（印 "Yes"），但嚴格來說是 UB，參考題解未提及。
+
 ---
 
 ## 參考資料
