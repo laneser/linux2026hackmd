@@ -2432,12 +2432,6 @@ merge 函式使用 `**tail` 技巧（同 `lib/list_sort.c`），避免 dummy nod
 
 測試程式碼：[`quiz_linked_list/q2/`](https://github.com/laneser/warmup/tree/main/quiz_linked_list/q2)，在 `quiz_linked_list/` 目錄下執行 `make q2_report` 即可重現。
 
-##### 參考題解的改進建議
-
-1. **merge 迴圈結束後缺少 `merge->next = NULL`**：合併結束時，最後被接上的節點的 `next` 仍指向排序前的下一個節點。在目前的 1-vs-(n-1) split 下不會顯現問題（因為 right 子串列尾端已是 NULL），但若依延伸題要求改為對半切，此 bug 會導致串列結構損壞。兩份參考題解皆未提及此問題。
-
-2. **穩定性**：merge 的比較使用 `<`（嚴格小於），導致排序不穩定。兩份參考題解皆未提及此問題。
-
 ---
 
 ## 參考資料
