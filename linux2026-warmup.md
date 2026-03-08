@@ -2183,7 +2183,9 @@ Linux 核心常用結構體多數 $\geq 128$ bytes（見上方 slabinfo 表格�
 
 結論並非「陣列永遠比鏈結串列快」，而是取決於 $(n, i, s)$ 三者的組合。小元素 + 已知位置（如 tail pointer）時陣列佔優；大結構體 + 非尾部插入時鏈結串列更快。鏈結串列的另一優勢在於**結構特性**：插入刪除不影響其他元素的位址（不會使指標失效）、不需要連續記憶體區塊。選擇資料結構時，應根據 $(n, i, s)$ 的具體組合，而非僅看漸近複雜度。
 
-## 逐一分析[第一週教材列出](https://wiki.csie.ncku.edu.tw/linux/schedule)的題目 1 到題目 7，確認理解題目且充分作答，並指出參考題解的錯誤和待改進之處
+## 鏈結串列歷屆測驗分析
+
+- [ ] 逐一分析[第一週教材列出](https://wiki.csie.ncku.edu.tw/linux/schedule)的**題目 1** 到**題目 7**，確認理解題目且充分作答，並指出參考題解的錯誤和待改進之處
 
 ### 題目 1
 
@@ -2359,7 +2361,7 @@ test_bubble_sort_duplicates:FAIL: assertion failed
 10 Tests 7 Failures 0 Ignored
 ```
 
-測試程式碼：[quiz_linked_list/q1/](https://github.com/laneser/warmup/tree/main/quiz_linked_list/q1)。測試函式透過全域函式指標（`impl_FuncB`、`impl_FuncC`、`impl_bubble_sort`）呼叫實作，原始版本和建議版本共用相同的 10 個測試函式，僅在 `main()` 中綁定不同的實作。
+測試程式碼：[quiz_linked_list/q1/](https://github.com/laneser/warmup/tree/main/quiz_linked_list/q1)，在 `quiz_linked_list/` 目錄下執行 `make q1_report` 即可產出上述結果。測試函式透過全域函式指標（`impl_FuncB`、`impl_FuncC`、`impl_bubble_sort`）呼叫實作，原始版本和建議版本共用相同的 10 個測試函式，僅在 `main()` 中綁定不同的實作。
 
 ---
 
