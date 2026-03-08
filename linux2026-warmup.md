@@ -2432,6 +2432,77 @@ merge 函式使用 `**tail` 技巧（同 `lib/list_sort.c`），避免 dummy nod
 
 測試程式碼：[`quiz_linked_list/q2/`](https://github.com/laneser/warmup/tree/main/quiz_linked_list/q2)，在 `quiz_linked_list/` 目錄下執行 `make q2_report` 即可重現。
 
+#### 題目 3
+
+> 題目：[2020q3 第 1 週測驗題](https://hackmd.io/@sysprog/sysprog2020-quiz1)（測驗 1：singly-linked list 操作）
+> 參考題解：[RinHizakura](https://hackmd.io/@RinHizakura/BysgszHNw)
+
+##### 選擇題作答
+
+題目給定 `add_entry`、`find_entry`、`remove_entry`、`swap_pair`、`reverse` 五個函式，要求填入 AA1、AA2、BB1、BB2、CCC 五個空格。
+
+| 空格 | 答案 | 說明 |
+|------|------|------|
+| AA1 | `assert(new_node)` | malloc 後檢查是否成功 |
+| AA2 | `*indirect = new_node` | 將新節點接到串列尾端 |
+| BB1 | `node = &(*node)->next->next` | 推進到下一對節點（`->` 優先於 `&`） |
+| BB2 | `*node = (*node)->next` | 將 node 指向的位址換成下一個節點 |
+| CCC | `head->next = cursor; cursor = head` | 反轉指向後推進 cursor |
+
+與參考題解答案一致。
+
+##### 參考題解評論
+
+此份參考題解寫得相當用心：以 Graphviz 逐步圖解每個函式的指標操作、深入探討 `assert` 的擺放位置（Issue 1）及使用時機（Issue 2）、延伸題全數完成（pointer-to-pointer 改寫、遞迴 reverse、Fisher-Yates shuffle），並針對 `swap_pair` 的兩種實作（交換指標 vs 交換值）做了效能實驗與 Cachegrind 分析。以下提出幾項額外建議。
+
+**1. `assert(new_node)` 在 Linux overcommit 下形同虛設**
+
+參考題解的 Issue 1 和 Issue 2 深入討論了 `assert` 的位置和用途，但在 Linux 預設的 overcommit 模式（`vm.overcommit_memory = 0`）下，`malloc` 幾乎不會回傳 NULL——核心先答應分配（只記帳），等實際存取時記憶體不足才觸發 OOM Killer 直接 `SIGKILL` 殺掉行程。程式碼裡的 `assert` 或 `if` 檢查都來不及執行。
+
+`malloc` 失敗的本質是 OOM（記憶體不足），不是程式 bug，但 `assert` 的語意是「這不可能發生，發生就是 bug」。若要在 userspace 處理 OOM，概念上應該是 `fprintf(stderr, "Out of memory\n"); exit(1);`——不過在 Linux overcommit 下這也幾乎不會被觸發。
+
+**2. `remove_entry` 沒有防護 entry 不在串列中**
+
+```c
+while ((*indirect) != entry)
+    indirect = &(*indirect)->next;
+```
+
+若 `entry` 不在串列中，`*indirect` 最終為 NULL，下一次迴圈執行 `&(*indirect)->next` 就是 dereference NULL。而若 `entry` 本身為 NULL，迴圈雖能正常結束，但隨後 `entry->next` 同樣 dereference NULL。
+
+**3. `main` 中 `find_entry` 的回傳值沒有檢查**
+
+```c
+node_t *entry = find_entry(head, 101);
+remove_entry(&head, entry);  /* entry 可能是 NULL */
+```
+
+`find_entry` 找不到時回傳 NULL，直接傳給 `remove_entry` 會觸發上述的 NULL dereference。
+
+**4. `recursive_rev` 沒有處理空串列**
+
+```c
+void recursive_rev(node_t **head) {
+    if (!head)     /* 檢查的是 pointer-to-pointer，不是串列本身 */
+        return;
+    recursive_rev_step(*head, NULL, head);  /* *head == NULL 時 crash */
+}
+```
+
+當串列為空（`*head == NULL`）時，`recursive_rev_step(NULL, ...)` 會在 `curr->next` crash。建議改為 `if (!head || !*head)`。
+
+**5. `shuffle` 中 `srand(time(NULL))` 建議放在 `main`**
+
+`srand` 放在 `shuffle` 函式內，若短時間內多次呼叫，`time(NULL)` 回傳相同秒數，會產生相同的隨機序列。`srand` 應在程式啟動時呼叫一次，或改由呼叫者決定是否重設種子。
+
+**6. 回應參考題解的延伸問題**
+
+參考題解提出兩個延伸問題：如何檢驗 shuffle 是否「足夠亂」，以及是否有更有效率的實作方式。
+
+對於驗證隨機性，可以多次執行 shuffle 後統計每個元素出現在每個位置的頻率，以 chi-squared test 檢驗是否偏離均勻分布。但更根本的問題是 `rand()` 本身——POSIX `rand()` 在某些實作中低位元的隨機性差，且 `rand() % len` 當 `len` 不整除 `RAND_MAX + 1` 時有 modulo bias。如果亂數來源不夠好，shuffle 演算法再正確也無法產生均勻分布的排列。更好的替代包括 `arc4random_uniform()`（無 modulo bias）或讀取 `/dev/urandom`。
+
+效率方面，目前的實作每次隨機選取第 k 個節點需走訪 O(k) 步，總體為 O(n²)。對 singly-linked list 可用 merge-based shuffle 達到 O(n log n)：每層隨機決定每個元素分到左或右子串列，遞迴後合併。
+
 ---
 
 ## 參考資料
