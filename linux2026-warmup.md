@@ -2232,7 +2232,7 @@ FuncC(&start, 63, 51);       // start → 48 → 51 → 63 → 72 → 86
 
 參考題解的作答（FuncA/FuncB/FuncC 的功能推敲與執行結果預測）正確。以下針對題目程式碼及 [bubble sort 參考實作](https://github.com/LinYunWen/c-review/blob/master/week4/bubble_sort.c)提出 5 項改進建議。
 
-**建議 1：FuncB 應加入空串列防護**
+**建議 1：FuncB 建議加入空串列防護**
 
 ```c
 void FuncB(struct node **start, int value) {
@@ -2241,28 +2241,25 @@ void FuncB(struct node **start, int value) {
 
 第一行直接解引用 `(*start)->prev`，當 `*start == NULL` 時觸發 segmentation fault。FuncA 有 `if (!*start)` 的防護，FuncB 卻沒有。
 
-**建議 2：FuncC 應加入空串列防護**
+**建議 2：FuncC 建議加入空串列防護**
 
 ```c
-void FuncC(struct node **start, int value1, int value2) {
-    struct node *new_node = malloc(sizeof(struct node));
-    new_node->data = value1;
     struct node *temp = *start;
     while (temp->data != value2)  /* *start == NULL 時 segfault */
 ```
 
 與 FuncB 相同的問題——`*start == NULL` 時直接解引用 `temp->data` 導致 segfault。
 
-**建議 3：FuncC 應處理目標值不存在的情況**
+**建議 3：FuncC 建議處理目標值不存在的情況**
 
 ```c
     while (temp->data != value2)
         temp = temp->next;
 ```
 
-環狀串列沒有 `NULL` 終止條件。若 `value2` 不存在於串列中，`while` 迴圈會無限走訪。應改用 `do { ... } while (temp != *start)` 並在迴圈結束後檢查是否找到目標。
+環狀串列沒有 `NULL` 終止條件。若 `value2` 不存在於串列中，`while` 迴圈會無限走訪。建議改用 `do { ... } while (temp != *start)` 並在迴圈結束後檢查是否找到目標。
 
-**建議 4：exchange() 應改為交換資料**
+**建議 4：exchange() 建議改為交換資料**
 
 ```c
 void exchange(struct node **left, struct node **right) {
@@ -2277,19 +2274,9 @@ void exchange(struct node **left, struct node **right) {
 1. **覆蓋前未保存原值**：第 1 行覆蓋 `(*left)->next` 後，第 2 行讀取的 `(*left)->prev` 仍是舊值（此處恰好沒問題），但 `(*right)->next` 已在第 1 行被間接影響——因為 `*right` 就是原本的 `(*left)->next`。
 2. **未更新鄰居指標**：交換後，`(*left)->next` 指向的節點的 `prev`、以及 `(*right)->prev` 指向的節點的 `next` 都未更新，導致鏈結完整性破壞。
 
-對於此題（`data` 為 `int`），更簡潔的做法是**交換資料而非重新鏈結節點**：
+對於此題（`data` 為 `int`），更簡潔的做法是**交換資料而非重新鏈結節點**——時間複雜度同為 $O(1)$ 且不涉及指標操作，不會破壞串列結構。
 
-```c
-if (cur->data > cur->next->data) {
-    int tmp = cur->data;
-    cur->data = cur->next->data;
-    cur->next->data = tmp;
-}
-```
-
-交換資料的時間複雜度為 $O(1)$ 且不涉及指標操作，不會破壞串列結構。
-
-**建議 5：bubble_sort() 應在每輪外層迴圈重設走訪起點**
+**建議 5：bubble_sort() 建議在每輪外層迴圈重設走訪起點**
 
 ```c
 void bubble_sort(struct node **start, int length) {
@@ -2308,26 +2295,7 @@ void bubble_sort(struct node **start, int length) {
 
 `left` 和 `right` 在 `for (int i = ...)` 之前初始化，但每輪外層迴圈結束後未重設回起點。第二輪開始時，走訪從上一輪結束的位置繼續，導致排序結果錯誤。
 
-**建議版本**
-
-修正後的完整實作（交換資料 + 每輪重設起點）：
-
-```c
-void bubble_sort(struct node **start, int length)
-{
-    for (int i = 0; i < length - 1; i++) {
-        struct node *cur = *start;  /* 每輪重設 */
-        for (int j = 0; j < length - 1 - i; j++) {
-            if (cur->data > cur->next->data) {
-                int tmp = cur->data;
-                cur->data = cur->next->data;
-                cur->next->data = tmp;
-            }
-            cur = cur->next;
-        }
-    }
-}
-```
+修正後的完整實作（交換資料 + 每輪重設起點）見 [`quiz_linked_list/q1/fix_quiz1_q1.c`](https://github.com/laneser/warmup/blob/main/quiz_linked_list/q1/fix_quiz1_q1.c)。
 
 **測試驗證**
 
@@ -2388,6 +2356,87 @@ test_bubble_sort_duplicates:FAIL: assertion failed
 
 1. **`data++` vs `(*data)++`**：題目原始碼是 `data++`（指標遞增），但參考題解在重新貼出程式碼時改為 `(*data)++`（值遞增），導致後續 count 的分析基於錯誤的前提。以題目原始碼為準，count 應為 0。
 2. **K1 的 `return NULL - head` 是未定義行為**：C99 6.5.6§9 規定指標相減時兩個指標必須指向同一陣列物件的元素。`NULL` 減去有效指標不符合此條件。實務上多數平台得到非零值（印 "Yes"），但嚴格來說是 UB，參考題解未提及。
+
+
+#### 題目 2
+
+> 題目：[2020q1 第 1 週測驗題](https://hackmd.io/@sysprog/linux2020-quiz1)（測驗 1：merge sort on singly-linked list）
+> 參考題解：[Ryspon](https://hackmd.io/@Ryspon/HJVH8B0XU)、[chses9440611](https://hackmd.io/@chses9440611/Sy5gwE37I)
+
+##### 選擇題作答
+
+題目給定單向鏈結串列的 merge sort 實作（[原始碼](https://hackmd.io/@sysprog/linux2020-quiz1#%E6%B8%AC%E9%A9%97-1)），要求填入 LL0–LL6 七個空格。分為兩段分析：**split** 和 **merge**。
+
+**Split**（LL0）：`left = start` 指向第一個節點，`right = left->next` 指向第二個。要讓 `left` 成為獨立子串列，需切斷 `left->next`：
+
+- LL0 = `left->next = NULL`
+
+**Merge**（LL1–LL6）：merge 迴圈將兩個已排序子串列合併。`merge` 指標追蹤合併結果的尾端，`start` 記錄合併結果的開頭。左右兩側的邏輯完全對稱：
+
+| 空格 | 答案 | 說明 |
+|------|------|------|
+| LL1 | `start = merge = left` | 第一個合併元素來自 left，同時設定 start 和 merge |
+| LL2 | `merge->next = left` | 將 left 接到合併結果尾端 |
+| LL3 | `left = left->next` | 推進 left 指標 |
+| LL4 | `start = merge = right` | 第一個合併元素來自 right |
+| LL5 | `merge->next = right` | 將 right 接到合併結果尾端 |
+| LL6 | `right = right->next` | 推進 right 指標 |
+
+兩份參考題解的選擇題答案皆與上述一致。chses9440611 額外指出 LL1 可以只寫 `merge = left`（因為此時 `start == left`），但選項中 `start = merge = left` 更完整。
+
+##### 延伸題 1：程式運作原理
+
+此程式是 top-down recursive merge sort，但 split 策略特殊：每次只切下第一個節點（1 個元素）作為 `left`，剩餘全部（n-1 個元素）作為 `right`。遞迴樹長這樣（以 5 個元素為例）：
+
+```
+sort([1,5,3,2,4])
+├── sort([1])           ← 1 個
+└── sort([5,3,2,4])     ← 4 個
+    ├── sort([5])
+    └── sort([3,2,4])   ← 3 個
+        ├── sort([3])
+        └── sort([2,4]) ← 2 個
+```
+
+遞迴深度為 n-1。第 k 層 merge 的工作量為 k，總比較次數為 $1+2+\cdots+(n-1) = O(n^2)$。
+
+##### 延伸題 2：改進空間
+
+1. **Split 策略**：使用 fast/slow pointer 對半切（`slow` 每次走一步，`fast` 每次走兩步），遞迴深度降為 $O(\log n)$，每層總 merge 工作量為 $O(n)$，整體回到標準的 $O(n \log n)$。
+
+2. **穩定性**：原始程式的比較條件是 `left->data < right->data`（嚴格小於），相等時走 else 分支取 right，打亂了相等元素的原始順序——排序不穩定。改為 `<=` 即可保證穩定性。Linux 核心的 [`lib/list_sort.c:19-20`](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c#L19-L20) 明確註明 `/* if equal, take 'a' -- important for sort stability */`。
+
+3. **合併結果未收尾**：merge 迴圈結束後，最後一個被接上的節點的 `next` 仍指向其原本的下一個節點（已被排到其他位置），形成 dangling pointer。應在迴圈結束後加上 `merge->next = NULL`。以 `[2, 1, 3]` 為例：排序 `[1, 3]` 後 `1->next` 指向 `3`；與 `[2]` 合併時，`merge` 最終指向 `3`，但 `3->next` 仍是 merge 前的值——若原始串列更長，這可能指向已被重新鏈結的節點。在此題的 1-vs-(n-1) split 下，恰好因為 right 子串列是遞迴排序過的結果（尾端為 NULL），問題不會顯現；但若改為對半切，此 bug 會導致錯誤。
+
+##### 延伸題 3+4：Circular doubly-linked list 與 list.h 風格
+
+將排序擴充為 circular doubly-linked list，同時依循 Linux 核心 [`include/linux/list.h`](https://github.com/torvalds/linux/blob/v6.19/include/linux/list.h) 的設計：資料結構內嵌 `struct list_head`，透過 `container_of` 存取資料，比較函式接受 `struct list_head *` 參數。
+
+策略參考 Linux 核心 [`lib/list_sort.c`](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c) 的做法：
+
+1. 打斷環狀結構，轉為 NULL-terminated singly-linked list（暫時忽略 `prev`）
+2. 用 fast/slow pointer 對半切，遞迴 merge sort
+3. 排序完成後，重建所有 `prev` 指標並恢復環狀結構
+
+merge 函式使用 `**tail` 技巧（同 `lib/list_sort.c`），避免 dummy node，並以 `<= 0` 比較保證穩定性。完整實作見 [`merge_sort_linux.c`](https://github.com/laneser/warmup/blob/main/quiz_linked_list/q2/merge_sort_linux.c)，對應的精簡版 `list.h` 見 [`list.h`](https://github.com/laneser/warmup/blob/main/quiz_linked_list/q2/list.h)。
+
+##### 延伸題 5：Iterative 版本
+
+將遞迴改為 bottom-up iterative：從寬度 1 開始，每輪將相鄰的兩個子串列合併，寬度倍增直到涵蓋整個串列。不需要遞迴的 call stack，空間複雜度 $O(1)$。完整實作見 [`merge_sort_iterative.c`](https://github.com/laneser/warmup/blob/main/quiz_linked_list/q2/merge_sort_iterative.c)。
+
+##### 測試驗證
+
+使用 [Unity](https://github.com/ThrowTheSwitch/Unity) 測試框架，對四個版本（原始、改進、iterative、list.h 風格）各執行 11 項測試：NULL、單元素、兩元素順序/逆序、已排序、逆序、重複值、全相同、負數、隨機（10 種大小 0–100）、穩定性。
+
+穩定性測試（見 [`test_merge_sort_linux.c`](https://github.com/laneser/warmup/blob/main/quiz_linked_list/q2/test_merge_sort_linux.c) 的 `test_stability`）利用自訂 comparator 只比較低 16 位元，將原始位置編碼在 `data` 的高 16 位元，排序後驗證相同鍵的元素是否維持原始順序。將 [`merge_sort_linux.c:37`](https://github.com/laneser/warmup/blob/main/quiz_linked_list/q2/merge_sort_linux.c#L37) 的 `<=` 改為 `<`，穩定性測試立即失敗：`Expected 0x00010001 Was 0x00030001`（index=3 的元素排到了 index=1 之前）。
+
+測試程式碼：[`quiz_linked_list/q2/`](https://github.com/laneser/warmup/tree/main/quiz_linked_list/q2)，在 `quiz_linked_list/` 目錄下執行 `make q2_report` 即可重現。
+
+##### 參考題解的改進建議
+
+1. **merge 迴圈結束後缺少 `merge->next = NULL`**：合併結束時，最後被接上的節點的 `next` 仍指向排序前的下一個節點。在目前的 1-vs-(n-1) split 下不會顯現問題（因為 right 子串列尾端已是 NULL），但若依延伸題要求改為對半切，此 bug 會導致串列結構損壞。兩份參考題解皆未提及此問題。
+
+2. **穩定性**：merge 的比較使用 `<`（嚴格小於），導致排序不穩定。兩份參考題解皆未提及此問題。
 
 ---
 
