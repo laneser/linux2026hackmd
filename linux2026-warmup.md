@@ -2183,6 +2183,184 @@ Linux 核心常用結構體多數 $\geq 128$ bytes（見上方 slabinfo 表格�
 
 結論並非「陣列永遠比鏈結串列快」，而是取決於 $(n, i, s)$ 三者的組合。小元素 + 已知位置（如 tail pointer）時陣列佔優；大結構體 + 非尾部插入時鏈結串列更快。鏈結串列的另一優勢在於**結構特性**：插入刪除不影響其他元素的位址（不會使指標失效）、不需要連續記憶體區塊。選擇資料結構時，應根據 $(n, i, s)$ 的具體組合，而非僅看漸近複雜度。
 
+## 鏈結串列歷屆測驗分析
+
+課程要求逐一分析[第一週教材列出](https://wiki.csie.ncku.edu.tw/linux/schedule)的題目 1 到題目 7，確認理解題目且充分作答，並指出參考題解的錯誤和待改進之處。
+
+### 題目 1：2018q1 quiz4 Q1（環狀雙向鏈結串列）
+
+> 原始題目：[Linked List 練習題](https://hackmd.io/@sysprog/linked-list-quiz)
+> 參考題解：[LinYunWen/c-review (week4)](https://github.com/LinYunWen/c-review/tree/master/week4)
+
+題目給定環狀雙向鏈結串列（circular doubly-linked list）的結構與三個操作函式，要求推敲其功能並預測執行結果：
+
+```c
+struct node {
+    int data;
+    struct node *next, *prev;
+};
+```
+
+#### 作答
+
+**FuncA**：在串列尾端插入新節點。開頭的 `if (!*start)` 處理空串列情況（新節點的 `next` 和 `prev` 皆指向自身）；非空時，透過 `(*start)->prev` 取得尾節點 `last`，將新節點接在 `last` 之後、`*start` 之前，維持環狀結構。`*start` 不變，故新節點成為尾節點。
+
+**FuncB**：在串列開頭插入新節點。邏輯與 FuncA 相似——同樣取得 `last = (*start)->prev`，將新節點接在 `last` 之後、`*start` 之前——差異在於最後一行 `*start = new_node` 更新頭指標，使新節點成為新的開頭。
+
+**FuncC**：在值為 `value2` 的節點之後插入值為 `value1` 的新節點。以 `while (temp->data != value2)` 走訪串列找到目標節點，再將新節點插入其後。
+
+**執行結果預測**：
+
+```
+FuncA(&start, 51);           // start → 51
+FuncB(&start, 48);           // start → 48 → 51
+FuncA(&start, 72);           // start → 48 → 51 → 72
+FuncA(&start, 86);           // start → 48 → 51 → 72 → 86
+FuncC(&start, 63, 51);       // start → 48 → 51 → 63 → 72 → 86
+```
+
+輸出：`Traversal in forward direction: 48 51 63 72 86`
+
+**延伸題——排序所需的額外函式**：
+
+- Bubble sort：需要 swap 函式（交換兩節點的資料或位置）
+- Merge sort：需要 split 函式（將串列分成兩半）和 merge 函式（合併兩個已排序串列）
+
+#### 參考題解的錯誤與改進
+
+參考題解的作答（FuncA/FuncB/FuncC 的功能推敲與執行結果預測）正確。以下針對延伸題的 [bubble sort 參考實作](https://github.com/LinYunWen/c-review/blob/master/week4/bubble_sort.c)指出 5 個錯誤。
+
+##### 錯誤 1：FuncB 缺少空串列防護
+
+```c
+void FuncB(struct node **start, int value) {
+    struct node *last = (*start)->prev;  /* *start == NULL 時 segfault */
+```
+
+第一行直接解引用 `(*start)->prev`，當 `*start == NULL` 時觸發 segmentation fault。FuncA 有 `if (!*start)` 的防護，FuncB 卻沒有。
+
+##### 錯誤 2：FuncC 缺少空串列防護
+
+```c
+void FuncC(struct node **start, int value1, int value2) {
+    struct node *new_node = malloc(sizeof(struct node));
+    new_node->data = value1;
+    struct node *temp = *start;
+    while (temp->data != value2)  /* *start == NULL 時 segfault */
+```
+
+與 FuncB 相同的問題——`*start == NULL` 時直接解引用 `temp->data` 導致 segfault。
+
+##### 錯誤 3：FuncC 在找不到目標值時無限迴圈
+
+```c
+    while (temp->data != value2)
+        temp = temp->next;
+```
+
+環狀串列沒有 `NULL` 終止條件。若 `value2` 不存在於串列中，`while` 迴圈會無限走訪。應改用 `do { ... } while (temp != *start)` 並在迴圈結束後檢查是否找到目標。
+
+##### 錯誤 4：exchange() 指標操作不完整
+
+```c
+void exchange(struct node **left, struct node **right) {
+    (*left)->next = (*right)->next;     /* 覆蓋前未保存原值 */
+    (*right)->prev = (*left)->prev;     /* 同上 */
+    (*left)->prev = *right;
+    (*right)->next = *left;
+}
+```
+
+此函式意圖交換兩個相鄰節點的位置，但有兩個問題：
+1. **覆蓋前未保存原值**：第 1 行覆蓋 `(*left)->next` 後，第 2 行讀取的 `(*left)->prev` 仍是舊值（此處恰好沒問題），但 `(*right)->next` 已在第 1 行被間接影響——因為 `*right` 就是原本的 `(*left)->next`。
+2. **未更新鄰居指標**：交換後，`(*left)->next` 指向的節點的 `prev`、以及 `(*right)->prev` 指向的節點的 `next` 都未更新，導致鏈結完整性破壞。
+
+對於此題（`data` 為 `int`），更簡潔的做法是**交換資料而非重新鏈結節點**：
+
+```c
+if (cur->data > cur->next->data) {
+    int tmp = cur->data;
+    cur->data = cur->next->data;
+    cur->next->data = tmp;
+}
+```
+
+交換資料的時間複雜度為 $O(1)$ 且不涉及指標操作，不會破壞串列結構。
+
+##### 錯誤 5：bubble_sort() 未在每輪外層迴圈重設走訪起點
+
+```c
+void bubble_sort(struct node **start, int length) {
+    struct node *left = *start;
+    struct node *right = left->next;
+    for (int i = 0; i < length - 1; i++) {
+        for (int j = i + 1; j < length; j++) {
+            ...
+            left = left->next;
+            right = right->next;
+        }
+        /* left/right 未重設為 *start，下一輪從錯誤位置開始 */
+    }
+}
+```
+
+`left` 和 `right` 在 `for (int i = ...)` 之前初始化，但每輪外層迴圈結束後未重設回起點。第二輪開始時，走訪從上一輪結束的位置繼續，導致排序結果錯誤。
+
+##### 修正版本
+
+修正後的完整實作（交換資料 + 每輪重設起點）：
+
+```c
+void bubble_sort(struct node **start, int length)
+{
+    for (int i = 0; i < length - 1; i++) {
+        struct node *cur = *start;  /* 每輪重設 */
+        for (int j = 0; j < length - 1 - i; j++) {
+            if (cur->data > cur->next->data) {
+                int tmp = cur->data;
+                cur->data = cur->next->data;
+                cur->next->data = tmp;
+            }
+            cur = cur->next;
+        }
+    }
+}
+```
+
+##### 測試驗證
+
+使用 [Unity](https://github.com/ThrowTheSwitch/Unity) C 測試框架，對相同的 10 個測試案例分別執行 buggy 版和修正版。Buggy 版使用 `fork()` 隔離執行以捕捉 segfault 和無限迴圈：
+
+```
+=== Fixed version (Unity tests) ===
+test_FuncB_empty_list:PASS
+test_FuncB_prepend:PASS
+test_FuncC_empty_list:PASS
+test_FuncC_value_not_found:PASS
+test_FuncC_insert_after:PASS
+test_bubble_sort_basic:PASS
+test_bubble_sort_already_sorted:PASS
+test_bubble_sort_reverse:PASS
+test_bubble_sort_single:PASS
+test_bubble_sort_duplicates:PASS
+10 Tests 0 Failures 0 Ignored
+
+=== Buggy version (expected failures confirm bugs) ===
+test_FuncB_empty_list:FAIL: crashed (SIGSEGV)
+test_FuncB_prepend:PASS
+test_FuncC_empty_list:FAIL: crashed (SIGSEGV)
+test_FuncC_value_not_found:FAIL: timed out (infinite loop)
+test_FuncC_insert_after:PASS
+test_bubble_sort_basic:FAIL: assertion failed
+test_bubble_sort_already_sorted:FAIL: assertion failed
+test_bubble_sort_reverse:FAIL: assertion failed
+test_bubble_sort_single:PASS
+test_bubble_sort_duplicates:FAIL: assertion failed
+10 Tests 7 Failures 0 Ignored
+```
+
+測試程式碼：[quiz_linked_list/q1/](https://github.com/laneser/linuxkernel2026/tree/main/homework/warmup/quiz_linked_list/q1)。測試函式透過全域函式指標（`impl_FuncB`、`impl_FuncC`、`impl_bubble_sort`）呼叫實作，buggy 版和修正版共用相同的 10 個測試函式，僅在 `main()` 中綁定不同的實作。
+
 ---
 
 ## 參考資料
