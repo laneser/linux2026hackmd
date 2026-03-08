@@ -2145,31 +2145,31 @@ $$C_{\text{shift}}(s) = \frac{5000 \times 50 + 100}{10000} \approx 25 \text{ 週
 | `signal_cache` | 1,152 | 信號處理 |
 | `task_struct` | 11,840 | 行程描述子 |
 
-多數結構體 $\geq 128$ bytes，`task_struct` 更達 11 KB。成本模型預測 $C_{\text{arr}}(n, i, s)$ 隨 $s$ 線性成長而 $C_{\text{LL}}(n, i, s)$ 幾乎不變，以下以 $s = 4 / 32 / 128 / 512$ bytes 實測驗證：
+多數結構體 $\geq 128$ bytes，`task_struct` 更達 11 KB。成本模型預測 $C_{\text{arr}}(n, i, s)$ 隨 $s$ 線性成長而 $C_{\text{LL}}(n, i, s)$ 幾乎不變，以下在三台機器上以 $s = 4 / 32 / 128 / 512$ bytes 實測驗證：
 
 ![Element size comparison](https://raw.githubusercontent.com/laneser/linux2026hackmd/main/bench_sizes.svg)
 
-**Head insert（$n = 20000$）：**
+**Head insert（$n = 20000$）：** 三台機器一致顯示 LL 成本不隨 $s$ 變化，Array 成本與 $s$ 成正比。
 
-| 元素大小 $s$ | LL (ns/op) | Array (ns/op) | Array / LL |
-|-------------|-----------|--------------|-----------|
-| 4 B | 8.9 | 253 | 28x |
-| 32 B | 9.5 | 1,942 | 204x |
-| 128 B | 14.1 | 10,035 | 712x |
-| 512 B | 31.0 | 43,894 | 1,416x |
+| $s$ | DevContainer LL / Arr | ARM LL / Arr | x86 LL / Arr |
+|-----|----------------------|-------------|-------------|
+| 4 B | 8.9 / 253 (28x) | 179 / 9,943 (56x) | 74 / 6,132 (83x) |
+| 32 B | 9.5 / 1,942 (204x) | 187 / 104,119 (557x) | 80 / 64,194 (802x) |
+| 128 B | 14 / 10,035 (712x) | 181 / 1,279,596 (7,073x) | 129 / 342,420 (2,666x) |
+| 512 B | 31 / 43,894 (1,416x) | 186 / 5,356,090 (28,797x) | 143 / 1,611,458 (11,276x) |
 
-鏈結串列的成本幾乎不隨 $s$ 變化（8.9–31 ns），驗證了模型預測：$C_{\text{LL}}(n, i, s)$ 中的 $C_{\text{traverse}}$ 和 $C_{\text{malloc}}$ 均不依賴 $s$。陣列的搬移成本則與 $s$ 成正比——$C_{\text{arr}}(n, 0, s) = n \times C_{\text{shift}}(s)$，512 B 元素的 Array/LL 比達 1,416 倍。
+LL 在每台機器上的成本幾乎恆定（不隨 $s$ 變化），驗證了 $C_{\text{LL}}(n, i, s)$ 中 $s$ 被消去的推導。Array 成本則隨 $s$ 線性暴增——ARM 上 $s = 512$ 時 Array 比 LL 慢近 29,000 倍。
 
-**Random insert（$n = 20000$）：**
+**Random insert（$n = 20000$）：** 這是最有趣的情境——陣列和鏈結串列都是 $O(n)$，勝負取決於 $s$。
 
-| 元素大小 $s$ | LL (ns/op) | Array (ns/op) | 比較 |
-|-------------|-----------|--------------|------|
-| 4 B | 8,794 | 121 | Array 快 73x |
-| 32 B | 11,227 | 1,015 | Array 快 11x |
-| 128 B | 15,668 | 5,047 | Array 快 3.1x |
-| 512 B | 15,571 | 21,938 | **LL 快 1.4x** |
+| $s$ | DevContainer | ARM | x86 |
+|-----|-------------|-----|-----|
+| 4 B | Array 快 73x | Array 快 9.9x | Array 快 13x |
+| 32 B | Array 快 11x | Array 快 3.5x | Array 快 6.3x |
+| 128 B | Array 快 3.1x | **LL 快 3.6x** | LL ≈ Array |
+| 512 B | **LL 快 1.4x** | **LL 快 15x** | **LL 快 4.4x** |
 
-$s = 512$ bytes 時**逆轉**：$C_{\text{arr}}(n, i, 512)$ 的搬移量 $512 \times 10000 = 5.12$ MB（遠超 L1/L2），而 $C_{\text{traverse}}(n, i)$ 不觸及 payload，成本不隨 $s$ 增長。隨著 $s$ 增大，Array 的優勢從 73 倍（$s=4$）逐步縮減至逆轉（$s=512$）。在 ARM Cortex-A53 上逆轉發生得更早——$s = 128$ 時鏈結串列已快 3.5 倍，因 in-order 核心的 `memmove` 效率更低。
+逆轉點因微架構而異：ARM（in-order，無大 L2/L3）在 $s = 128$ 即逆轉；x86 in-order 在 $s = 128$ 持平；DevContainer（OoO + 大 L3）要到 $s = 512$ 才逆轉。原因是 OoO 核心的 `memmove` 效率更高（prefetch + 指令重疊），拉高了陣列的損益平衡 $s$ 值。
 
 Linux 核心常用結構體多數 $\geq 128$ bytes（見上方 slabinfo 表格），處於鏈結串列的優勢區間。
 
