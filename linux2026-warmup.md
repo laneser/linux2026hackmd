@@ -1999,6 +1999,190 @@ $K$ 越大，比較越少。文獻分析得出 `list_sort` 的 $K \approx 1.207$
 
 步驟三的深度之和對比（無延遲 $11276$ vs 平衡 $10796$，差 $480$）已展示平衡化在結構上的好處，但前述上界無法精確量化改善幅度。Commit 引用的文獻以更精確的方法分析得出 `list_sort` 的 $K$ 穩定在 $1.207$ 附近，而無延遲版本的平均 $K \approx 1.0$，因此延遲合併平均省下約 $(1.207 - 1.0) \times n \approx 0.2n$ 次比較。
 
+### 鏈結串列 O(1) vs 陣列 O(n)：量化分析
+
+- [ ] 鏈結串列的新增節點的時間複雜度是 O(1)，而陣列 (array) 則是 O(n)，但在實際硬體上，陣列可能更快，解釋為何如此並充分量化分析
+
+#### 成本模型
+
+O(1) 和 O(n) 描述的是「操作次數隨資料量的成長速率」，但隱藏了每次操作的**實際硬體成本**。建立一個統一的成本模型，以三個參數量化插入成本：
+
+- $n$：目前的元素數量（影響搬移量和走訪距離）
+- $i$：插入位置（$0 \leq i \leq n$，決定搬移 / 走訪的方向與量）
+- $s$：元素大小（bytes，決定每次搬移觸及的資料量）
+
+**陣列插入：** 在位置 $i$ 插入一個元素，涉及兩項成本：(1) 確保空間足夠，(2) 將 $i$ 之後的 $n - i$ 個元素後移。
+
+空間管理策略決定第一項成本：
+
+- **預先配置固定容量**：一次 `malloc` 配置大陣列（如上限 $N_{\max}$），之後插入不再配置。配置成本為 $O(1)$（已攤提），但浪費 $(N_{\max} - n) \times$ 元素大小的記憶體。
+- **精確配置**：每次插入都 `realloc` 擴展一個元素。`realloc` 可能需要 `malloc` 新空間 + `memcpy` 全部 $n$ 個元素 + `free` 舊空間，成本 $O(n)$，比搬移本身更昂貴。
+- **倍增策略**（如 C++ `std::vector`）：容量不足時加倍。單次 `realloc` 成本 $O(n)$，但 $n$ 次插入的總配置成本為 $O(n)$，amortized 每次 $O(1)$。記憶體浪費最多 $n$ 個元素（最差情況下容量 $= 2n$）。
+
+以下分析採用**倍增策略**，因為它在時間與空間之間取得合理平衡。在此策略下，配置成本 amortized 後可忽略，插入的主要成本來自搬移：
+
+$$C_{\text{arr}}(n, i, s) = (n - i) \times C_{\text{shift}}(s)$$
+
+其中 $C_{\text{shift}}(s)$ 是搬移一個大小 $s$ bytes 的元素的成本。`memmove` 搬移 $(n - i) \times s$ bytes 的連續記憶體，具備空間區域性（spatial locality）。**$s$ 直接進入乘法**：搬移 $n$ 個 128-byte 元素需移動 $128n$ bytes，是 4-byte 元素的 32 倍。以 L1 內的 `memmove` 為例，4 bytes 約 4 個週期，128 bytes 需搬移 2 條快取行（假設 64-byte cache line），成本約 $30$+ 個週期。
+
+三種典型情境：
+- **頭部插入**（$i = 0$）：$C_{\text{arr}} = n \times C_{\text{shift}}(s)$，搬移量最大
+- **尾部插入**（$i = n$）：$C_{\text{arr}} = 0$，無需搬移
+- **隨機位置**（$i$ 均勻分布）：期望值 $E[C_{\text{arr}}] = \frac{n}{2} \times C_{\text{shift}}(s)$
+
+**鏈結串列插入：** 插入本身只需修改 2–3 個指標，但有兩項隱藏成本：
+
+1. **找到插入位置**：O(1) 的前提是「已持有插入位置的指標」。對於頭部和尾部，環狀鏈結串列可透過 `head` 和 `head->prev` 在 $O(1)$ 存取。但對於任意位置 $i$，必須走訪才能找到插入點。雙向鏈結串列可選擇從頭或尾走訪，取較短的方向：
+
+$$C_{\text{traverse}}(n, i) = \min(i,\; n - i) \times C_{\text{node-access}}$$
+
+注意 $C_{\text{traverse}}$ **不依賴 $s$**——走訪只讀取每個節點的 `next`/`prev` 指標，不觸及 payload 資料。這是鏈結串列在大元素時的關鍵優勢：$s$ 從 4 增至 512 bytes，走訪成本不變。$C_{\text{node-access}}$ 在節點分散時約等於一次快取未命中的延遲（$30$–$200$ 個週期，取決於快取層級）。期望走訪距離從單向的 $n/2$ 降為雙向的 $n/4$。
+
+2. **配置新節點**：每次插入都需 `malloc`，且新節點的記憶體位址不保證與既有節點相鄰。
+
+完整的成本模型，一般形式：
+
+$$C_{\text{LL}}(n, i, s) = C_{\text{traverse}}(n, i, s) + C_{\text{malloc}}(s) + C_{\text{ptr-ops}}$$
+
+逐項檢視 $s$ 的影響後可簡化（$C_{\text{ptr-ops}} \approx 10$ 週期，可忽略）：
+
+$$C_{\text{LL}}(n, i, s) \approx C_{\text{traverse}}(n, i) + C_{\text{malloc}}$$
+
+- $C_{\text{traverse}}(n, i, s) \to C_{\text{traverse}}(n, i)$：走訪只讀取每個節點的 `next`/`prev` 指標，不觸及 payload，因此與 $s$ 無關（前段已說明）。
+- $C_{\text{malloc}}(s) \to C_{\text{malloc}}$：glibc 在 fast bin 命中時（小物件、無競爭）約 $50$–$150$ 個時脈週期，取 $C_{\text{malloc}} \approx 100$。$s$ 影響配置的 size class，但在常見範圍（$\leq 512$ bytes）內差異不大，視為常數。
+
+**$s$ 從 $C_{\text{LL}}$ 的所有子項中消去**——這是與 $C_{\text{arr}}(n, i, s)$（隨 $s$ 線性成長）最根本的差異，也預測了一個交叉點：$s$ 夠大時，陣列的搬移成本將超過鏈結串列的走訪 + 配置成本。
+
+對於頭部和尾部（$C_{\text{traverse}} = 0$），$C_{\text{LL}} \approx C_{\text{malloc}} \approx 100$ 個週期，是真正的 $O(1)$。但對於任意位置 $i$，走訪成本隨 $i$ 線性成長，且每步都可能是快取未命中——這使得鏈結串列的「$O(1)$ 插入」在實務上**只對已知位置成立**。
+
+**記憶體開銷比較：** 鏈結串列的每個節點除了資料本身，還需儲存指標（雙向鏈結串列為 2 個指標，64 位元系統下共 16 bytes），加上 `malloc` 的 metadata 開銷。陣列（倍增策略）的浪費則是最差一倍容量。兩者的比較取決於**元素大小 $s$**：
+
+| 元素大小 $s$ | 陣列浪費（最差） | 鏈結串列額外開銷 | 哪個省？ |
+|-------------|----------------|----------------|---------|
+| 4 bytes (int) | $4n$ bytes | $\geq 16n$ bytes（指標） | 陣列 |
+| 64 bytes | $64n$ bytes | $16n$ bytes | 差距小 |
+| 256+ bytes | $256n$ bytes | $16n$ bytes | 鏈結串列 |
+
+後續實驗以 $s = 4 / 32 / 128 / 512$ bytes 四種 struct size 實測，驗證 $s$ 的不對稱影響。
+
+#### 損益平衡點
+
+**頭部和尾部（已知位置）：** 走訪成本為零，令 $C_{\text{arr}}(n, i, s) = C_{\text{malloc}}$ 求損益平衡：
+
+$$(n - i) \times C_{\text{shift}}(s) = C_{\text{malloc}}$$
+
+以 $s = 4$ bytes、$C_{\text{shift}}(4) \approx 4$ 週期為例：$n - i = 100/4 = 25$。但 $s = 128$ bytes 時 $C_{\text{shift}}(128) \approx 30$ 週期，損益平衡降至 $n - i = 100/30 \approx 3$——幾乎任何規模都是鏈結串列更快。
+
+**任意位置（需走訪）：** 令 $C_{\text{LL}}(n, i, s) = C_{\text{arr}}(n, i, s)$ 求損益平衡：
+
+$$\underbrace{\min(i, n-i) \times C_{\text{node-access}}}_{\text{LL 走訪（不依賴 $s$）}} + C_{\text{malloc}} = \underbrace{(n - i) \times C_{\text{shift}}(s)}_{\text{陣列搬移（$\propto s$）}}$$
+
+以隨機插入（$i$ 均勻分布，期望走訪距離 $n/4$）為例，解 $s$：
+
+$$\frac{n}{4} \times C_{\text{node-access}} + C_{\text{malloc}} = \frac{n}{2} \times C_{\text{shift}}(s)$$
+
+$$C_{\text{shift}}(s) = \frac{n/4 \times C_{\text{node-access}} + C_{\text{malloc}}}{n/2}$$
+
+取 $C_{\text{node-access}} \approx 50$ 週期（L2/L3 命中）、$C_{\text{malloc}} \approx 100$、$n = 20000$：
+
+$$C_{\text{shift}}(s) = \frac{5000 \times 50 + 100}{10000} \approx 25 \text{ 週期}$$
+
+一個元素觸及的快取行數約 $\lceil s / 64 \rceil$，每條快取行搬移約 $4$–$10$ 週期。$C_{\text{shift}}(s) = 25$ 大致對應 $s \approx 128$–$256$ bytes——與實驗中 $s = 128$ 時逆轉的觀察吻合。
+
+| 情境 | $C_{\text{LL}}(n, i, s)$ | $C_{\text{arr}}(n, i, s)$ | 損益平衡 |
+|------|------------|---------|---------|
+| 頭部（$i = 0$，有指標） | $C_{\text{malloc}} \approx 100$ | $n \times C_{\text{shift}}(s)$ | 解 $n$：$s=4$ 時 $n \approx 25$；$s=128$ 時 $n \approx 3$ |
+| 尾部（$i = n$，有指標） | $C_{\text{malloc}} \approx 100$ | $\approx 0$ | 陣列永遠更快 |
+| 隨機位置（需走訪） | $\frac{n}{4} C_{\text{node-access}} + C_{\text{malloc}}$ | $\frac{n}{2} C_{\text{shift}}(s)$ | 解 $s$：$n=20000$ 時 $s \approx 128$–$256$ bytes |
+
+#### 實驗驗證
+
+以 [`list_arr_bench.c`](https://github.com/laneser/warmup/blob/main/list_arr_bench.c) 對雙向環狀鏈結串列（每次 `malloc` 配置節點，random insert 採雙向走訪）和動態陣列（倍增策略 + `memmove`）分別插入 $n$ 個 `int` 元素，在三台不同架構的機器上各取 5 次平均：
+
+| 機器 | CPU | 微架構 | 時脈 | L1d | L2 | L3 |
+|------|-----|--------|------|-----|----|----|
+| Raspberry Pi | Cortex-A53 | ARM in-order | 1.2 GHz | 32 KB | — | — |
+| Celeron J1800 | Silvermont | x86 in-order | 2.4 GHz | 48 KB | 1 MB | — |
+| DevContainer | Xeon/Core (OoO) | x86 out-of-order | ~4 GHz | 32+ KB | 256+ KB | 數 MB |
+
+![Linked list vs Array insert benchmark](https://raw.githubusercontent.com/laneser/linux2026hackmd/main/bench_combined.svg)
+
+**Head insert（$i = 0$）：** 三台機器的趨勢一致——鏈結串列 per-op 成本穩定（不隨 $n$ 變化），陣列呈 $O(n)$ 成長。交叉點在 $n \approx 100$–$200$，與理論損益平衡 $n \approx 25$ 同一量級（差異來自 `memmove` 在小 $n$ 時的函式呼叫固定開銷）。
+
+**Tail insert（$i = n$）：** 沒有走訪成本（`head->prev` 直接存取尾端），兩者都是 $O(1)$。但三台機器表現不同：
+
+| 機器 | LL (ns/op) | Array (ns/op) | LL 週期 | Array 週期 | 結果 |
+|------|-----------|--------------|---------|-----------|------|
+| Cortex-A53 (in-order) | 175 | 88 | ~210 | ~106 | Array 快 2x |
+| Celeron J1800 (in-order) | 63 | 45 | ~152 | ~107 | Array 快 1.4x |
+| DevContainer (OoO) | 7.7 | 7.5 | ~31 | ~30 | 幾乎相同 |
+
+差距**純粹來自 `malloc` 的成本**：陣列 tail insert 只做 `data[size++] = val`，不需配置記憶體，三台的 Array 週期數相近（~106 vs ~107 vs ~30）。而 `malloc` 的週期數從 OoO 的 ~31 到 in-order ARM 的 ~210 差距達 7 倍——`malloc` 涉及 pointer chasing（free list）、條件分支、metadata 存取，這些操作在亂序執行中可重疊進行，在循序執行核心上只能逐步等待。
+
+**Random insert（雙向走訪）：** 鏈結串列採雙向走訪（$i \leq n/2$ 從頭，$i > n/2$ 從尾），期望走訪距離 $n/4$。$n = 50000$ 時各機器的陣列 / 鏈結串列速度比：
+
+| 機器 | LL (ns/op) | Array (ns/op) | 陣列快幾倍 |
+|------|-----------|--------------|----------|
+| Cortex-A53 | 503,681 | 12,977 | 39x |
+| Celeron J1800 | 174,928 | 6,742 | 26x |
+| DevContainer | 35,329 | 309 | 114x |
+
+三台機器一致顯示陣列遠勝鏈結串列——pointer chasing 的 $C_{\text{node-access}}$ 比連續搬移的 $C_{\text{shift}}$ 大一到兩個數量級。DevContainer 的差距更大（114x），因為 OoO + 大 L3 讓 `memmove` 的每元素成本極低，而 pointer chasing 即使在 OoO 上也無法有效重疊（每步依賴前一步的結果）。
+
+實測結論：以 $s = 4$ bytes 而言，除了頭部插入（已知位置且 $n$ 夠大）外，陣列在所有機器、所有情境都更快。`malloc` 的成本高度依賴微架構（in-order vs OoO 差 7 倍），而 pointer chasing 在任何架構上都是瓶頸。但這只是 $s$ 小時的結果——下節將驗證 $s$ 增大後的逆轉現象。
+
+#### 元素大小的影響
+
+上述實驗以 4-byte `int` 為元素，但 Linux 核心中鏈結串列的元素通常是較大的結構體。從 DevContainer（Linux 6.6, WSL2）的 `/proc/slabinfo` 可見常用結構體大小：
+
+| slab 名稱 | `objsize` (bytes) | 說明 |
+|-----------|------------------|------|
+| `pid` | 128 | 行程 ID |
+| `vm_area_struct` | 176 | 虛擬記憶體區域 |
+| `dentry` | 192 | 目錄項目快取 |
+| `inode_cache` | 624 | VFS inode |
+| `sock_inode_cache` | 832 | socket inode |
+| `signal_cache` | 1,152 | 信號處理 |
+| `task_struct` | 11,840 | 行程描述子 |
+
+多數結構體 $\geq 128$ bytes，`task_struct` 更達 11 KB。成本模型預測 $C_{\text{arr}}(n, i, s)$ 隨 $s$ 線性成長而 $C_{\text{LL}}(n, i, s)$ 幾乎不變，以下以 $s = 4 / 32 / 128 / 512$ bytes 實測驗證：
+
+![Element size comparison](https://raw.githubusercontent.com/laneser/linux2026hackmd/main/bench_sizes.svg)
+
+**Head insert（$n = 20000$）：**
+
+| 元素大小 $s$ | LL (ns/op) | Array (ns/op) | Array / LL |
+|-------------|-----------|--------------|-----------|
+| 4 B | 8.9 | 253 | 28x |
+| 32 B | 9.5 | 1,942 | 204x |
+| 128 B | 14.1 | 10,035 | 712x |
+| 512 B | 31.0 | 43,894 | 1,416x |
+
+鏈結串列的成本幾乎不隨 $s$ 變化（8.9–31 ns），驗證了模型預測：$C_{\text{LL}}(n, i, s)$ 中的 $C_{\text{traverse}}$ 和 $C_{\text{malloc}}$ 均不依賴 $s$。陣列的搬移成本則與 $s$ 成正比——$C_{\text{arr}}(n, 0, s) = n \times C_{\text{shift}}(s)$，512 B 元素的 Array/LL 比達 1,416 倍。
+
+**Random insert（$n = 20000$）：**
+
+| 元素大小 $s$ | LL (ns/op) | Array (ns/op) | 比較 |
+|-------------|-----------|--------------|------|
+| 4 B | 8,794 | 121 | Array 快 73x |
+| 32 B | 11,227 | 1,015 | Array 快 11x |
+| 128 B | 15,668 | 5,047 | Array 快 3.1x |
+| 512 B | 15,571 | 21,938 | **LL 快 1.4x** |
+
+$s = 512$ bytes 時**逆轉**：$C_{\text{arr}}(n, i, 512)$ 的搬移量 $512 \times 10000 = 5.12$ MB（遠超 L1/L2），而 $C_{\text{traverse}}(n, i)$ 不觸及 payload，成本不隨 $s$ 增長。隨著 $s$ 增大，Array 的優勢從 73 倍（$s=4$）逐步縮減至逆轉（$s=512$）。在 ARM Cortex-A53 上逆轉發生得更早——$s = 128$ 時鏈結串列已快 3.5 倍，因 in-order 核心的 `memmove` 效率更低。
+
+Linux 核心常用結構體多數 $\geq 128$ bytes（見上方 slabinfo 表格），處於鏈結串列的優勢區間。
+
+#### 小結
+
+漸近分析只看 $n$ 的成長率，但實際插入成本取決於三個參數 $(n, i, s)$：
+
+1. **$n$（元素數量）** 決定搬移量和走訪距離，但常數因子的差異往往比漸近行為更重要。鏈結串列的 `malloc` 在 in-order 核心上需 ~150–210 週期，在 OoO 核心上 ~30 週期；陣列 `memmove` 的每元素成本在小元素時僅 $\approx 4$ 週期。
+2. **$i$（插入位置）** 決定是否需要走訪。O(1) 的前提是「已持有插入位置的指標」。一旦需要走訪定位，$C_{\text{traverse}}(n, i)$ 中 pointer chasing 的常數因子比陣列的連續搬移大一到兩個數量級。
+3. **$s$（元素大小）** 是最關鍵的不對稱因子。$C_{\text{arr}}(n, i, s)$ 隨 $s$ 線性成長，$C_{\text{LL}}(n, i, s)$ 幾乎不變。$s = 4$ bytes 時陣列在 random insert 快 73 倍（OoO x86）；$s$ 增大後優勢逐步縮減，$s = 512$ bytes 時逆轉為鏈結串列快 1.4 倍（ARM 上 $s = 128$ 即逆轉）。Linux 核心常用結構體多數 $\geq 128$ bytes（見 slabinfo 表格），處於鏈結串列的優勢區間。
+
+結論並非「陣列永遠比鏈結串列快」，而是取決於 $(n, i, s)$ 三者的組合。小元素 + 已知位置（如 tail pointer）時陣列佔優；大結構體 + 非尾部插入時鏈結串列更快。鏈結串列的另一優勢在於**結構特性**：插入刪除不影響其他元素的位址（不會使指標失效）、不需要連續記憶體區塊。選擇資料結構時，應根據 $(n, i, s)$ 的具體組合，而非僅看漸近複雜度。
+
 ---
 
 ## 參考資料
