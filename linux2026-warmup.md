@@ -3125,14 +3125,17 @@ Linux 自 4.15 起實作 Kernel Page Table Isolation（KPTI），維護兩套 pa
 - **OOM killer**：[`mm/oom_kill.c`](https://github.com/torvalds/linux/blob/v6.19/mm/oom_kill.c) 在記憶體耗盡時選擇並終止佔用最多資源的行程
 - **cgroups**：可對 CPU、記憶體、I/O 頻寬設定配額，限制一組行程的整體資源消耗
 
-#### 當系統被脅持時：硬體中斷是最後防線
+#### 當系統負載過重時：實務上的限制
 
-即使惡意行程成功消耗大量 CPU 資源，使用者仍可透過硬體中斷奪回控制權。鍵盤中斷（IRQ 1）由中斷控制器直接遞送至 CPU，不需經過任何使用者態行程的配合：
+惡意行程大量消耗 CPU 或記憶體時，理論上硬體中斷仍會正常觸發，但實務上系統的回應能力會嚴重退化。
 
-- **Ctrl-C**：送 `SIGINT` 至前景行程群組，由終端驅動程式（tty layer）處理，不依賴目標行程的合作
-- **Magic SysRq**（[`drivers/tty/sysrq.c`](https://github.com/torvalds/linux/blob/v6.19/drivers/tty/sysrq.c)）：Alt+SysRq+組合鍵直接在中斷上下文中執行核心命令，可強制終止所有使用者行程（SysRq+i）、同步磁碟（SysRq+s）、重新開機（SysRq+b），即使系統幾乎無回應也能運作
-- **SSH 連線**：SSH 的封包由網路中斷觸發處理，獨立於本地行程排程。只要網路堆疊和 sshd 行程未被終止，遠端使用者可透過 SSH 登入後 `kill` 惡意行程
-- **搶佔式排程**（`CONFIG_PREEMPT`）：核心排程器透過 timer interrupt 強制搶佔執行過久的行程，確保其他行程（包括 sshd、終端驅動程式）有機會執行。即使在 `CONFIG_PREEMPT_NONE` 下，行程在從核心態返回使用者態時也會被搶佔
+**唯一可靠的手段是 Magic SysRq**（[`drivers/tty/sysrq.c`](https://github.com/torvalds/linux/blob/v6.19/drivers/tty/sysrq.c)）：Alt+SysRq+組合鍵直接在中斷上下文中執行核心命令（強制終止所有使用者行程、同步磁碟、重新開機），不需任何 userspace 行程被排程，因此即使系統幾乎無回應也能運作。
+
+其餘手段在高負載下未必有效：
+
+- **SSH 連線**：網路封包的接收確實由硬體中斷觸發，經 softirq 處理後放入 socket buffer（[`net/core/dev.c:7857`](https://github.com/torvalds/linux/blob/v6.19/net/core/dev.c#L7857) 的 `net_rx_action()`）。但 sshd 是普通 userspace 行程，必須被排程器排程才能從 socket `read()` 資料（[`net/core/sock.c:3602`](https://github.com/torvalds/linux/blob/v6.19/net/core/sock.c#L3602) 的 `sock_def_readable()` 僅喚醒行程，不執行它）。在記憶體壓力下，sshd 的記憶體頁可被 swap out（核心無自動保護機制，需行程主動呼叫 `mlockall()`），導致 sshd 被排程後又立刻因 page fault 進入 `io_schedule()` 等待磁碟 I/O（[`mm/filemap.c:1315`](https://github.com/torvalds/linux/blob/v6.19/mm/filemap.c#L1315)）。這就是實務上 swap 壓力大時 SSH 極慢甚至連不上的原因。
+- **`CONFIG_PREEMPT`**：允許核心在更多時機點搶佔行程，降低排程延遲。但在 thrashing 場景下無濟於事——所有行程 page fault 後透過 `io_schedule()` 自願讓出 CPU（[`kernel/sched/core.c:7773`](https://github.com/torvalds/linux/blob/v6.19/kernel/sched/core.c#L7773)），瓶頸是磁碟 I/O 延遲而非 CPU 排程延遲，搶佔式排程沒有東西可搶佔。
+- **Ctrl-C**：送 `SIGINT` 至前景行程群組，由終端驅動程式處理。對單一前景行程有效，但無法應對系統性的資源耗盡。
 
 真正的威脅不是「頻繁進入核心態」，而是**核心本身的漏洞**——例如 buffer overflow 讓攻擊者在 Ring 0 執行任意程式碼、修改 page table 權限、或停用中斷。這類攻擊繞過的不是系統呼叫機制的隔離，而是利用核心程式碼的缺陷突破隔離邊界本身。
 
