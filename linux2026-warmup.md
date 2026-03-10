@@ -2532,7 +2532,7 @@ linD026 的題解品質很好：以 Graphviz 逐步圖解每個函式的指標�
 1. PRNG 缺數學定義與評估標準——題解列出 glibc `random()` 原始碼，但未討論週期長度、均勻性、統計測試等理論面
 2. **TCO：編譯器具體做了什麼**——題解提到 tail call optimization 的效益，但未展示編譯器層級的轉換細節（下方深入分析）
 3. 「我想像中的 PRNG」措辭不當——技術寫作應以實驗結果和規格說明取代主觀印象
-4. 為何 `list_sort` 用 merge sort 而非 tree sort——本報告前文的 [list_sort 分析](#2-為何不使用-quicksort) 及 [O(1) vs O(n) 量化分析](#鏈結串列-O1-vs-陣列-On：量化分析) 有碰觸到此議題：cache locality 在現代硬體上的影響
+4. 為何 `list_sort` 用 merge sort 而非 tree sort——本報告前文的 [list_sort 分析](#2-為何不使用-quicksort) 有碰觸到此議題：穩定性、worst case O(n log n) 保證、以及 [量化分析](#鏈結串列-O1-vs-陣列-On：量化分析) 中 cache locality 在現代硬體上的影響
 
 以下針對第 2 點展開。
 
