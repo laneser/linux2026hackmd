@@ -2503,6 +2503,196 @@ void recursive_rev(node_t **head) {
 
 效率方面，目前的實作每次隨機選取第 k 個節點需走訪 O(k) 步，總體為 O(n²)。對 singly-linked list 可用 merge-based shuffle 達到 O(n log n)：每層隨機決定每個元素分到左或右子串列，遞迴後合併。
 
+#### 題目 4
+
+> 題目：[2021q1 第 1 週測驗題](https://hackmd.io/@sysprog/linux2021-quiz1)（測驗 1：singly-linked list quicksort）
+> 參考題解：[linD026](https://hackmd.io/@linD026/2021q1_quiz1)
+
+##### 選擇題作答
+
+題目給定 singly-linked list 的 quicksort 實作，要求填入 LLL、AAA、BBB、CCC 四個空格。
+
+`list_concat` 的 `while (*left)` 迴圈需將 `left` 推進到串列尾端的 `NULL` 位址。`left` 是 `node_t **`（指標的指標），因此每次迭代要取得「目前節點的 `next` 欄位的位址」：
+
+- LLL = `left = &((*left)->next)`
+
+`quicksort` 的 partition 迴圈中，`n->value > value` 為真時應加入 `right`，反之加入 `left`。`list_add_node_t` 的第一參數是 `node_t **`：
+
+- AAA = `&right`
+- BBB = `&left`
+
+排序完成後，依序串接 left、pivot、right：
+
+- CCC = `list_concat(&result, pivot); list_concat(&result, right)`
+
+##### 參考題解評論
+
+linD026 的題解品質很好：以 Graphviz 逐步圖解每個函式的指標操作、實作非遞迴版 quicksort、探討 linux-list 的 `list_qsort` 與題目程式碼的差異、並用 red-black tree 實作 tree sort 做效能比較。老師的四項回饋中：
+
+1. PRNG 缺數學定義與評估標準——題解列出 glibc `random()` 原始碼，但未討論週期長度、均勻性、統計測試等理論面
+2. **TCO：編譯器具體做了什麼**——題解提到 tail call optimization 的效益，但未展示編譯器層級的轉換細節（下方深入分析）
+3. 「我想像中的 PRNG」措辭不當——技術寫作應以實驗結果和規格說明取代主觀印象
+4. 為何 `list_sort` 用 merge sort 而非 tree sort——本報告前文的 [list_sort 分析](#為何不使用-quicksort) 及 [O(1) vs O(n) 量化分析](#鏈結串列-O1-vs-陣列-On量化分析) 有碰觸到此議題：cache locality 在現代硬體上的影響
+
+以下針對第 2 點展開。
+
+##### 深入 TCO：兩個層次的 tail recursion
+
+> 完整實驗程式碼與 Unity 測試：[`homework/warmup/tco/`](https://github.com/laneser/warmup/tree/main/tco)
+>
+> 在自己的機器上重現：
+> ```shell
+> cd tco
+> make test   # 執行 Unity 測試（52 項）
+> make plot   # 產生 qsort_O0.csv、qsort_O3.csv、qsort_bench.svg
+> ```
+> 需要 GCC 和 [uv](https://docs.astral.sh/uv/)（用於執行 `plot_bench.py`，自動安裝 matplotlib）。
+
+「Tail recursion」在 quicksort 語境下有兩個不同層次的意涵，必須區分清楚。
+
+**層次一：演算法層級的手動改寫**
+
+題目的延伸閱讀 [Tail Recursion](https://www.cs.nthu.edu.tw/~wkhon/algo08-tutorials/tutorial2b.pdf)（清大教材）討論的是 quicksort 的 **stack 空間問題**。原始 quicksort 有兩個遞迴呼叫，worst case stack 深度 O(n)。教材提出：
+
+- **Method I**：partition 後比較兩半大小，較大的用迴圈繼續 partition，較小的用遞迴處理。因為每次遞迴的對象保證 ≤ n/2，遞迴深度 O(log n)。
+- **Method II**（教材稱之為 "tail recursion"）：持續 partition 直到所有片段 < n/2，才遞迴處理。遞迴深度同樣 O(log n)。
+
+這是程式設計師**手動**決定哪邊遞迴、哪邊迴圈，藉此控制 stack 深度。
+
+**層次二：編譯器自動 TCO**
+
+編譯器的 Tail Call Optimization 是另一回事：當遞迴呼叫位於函式的最後一個操作（tail position），呼叫返回後不需要再做任何運算，編譯器可以將 `call` 替換為 `jmp`，重用當前 stack frame。GCC 透過 `-foptimize-sibling-calls`（`-O2` 以上自動啟用）實現此轉換。
+
+兩者的關聯：手動改寫把一個遞迴呼叫消除為迴圈，這恰好是編譯器 TCO 「會做的事」——只是程式設計師自己做了。差別在於編譯器 TCO 只能處理已經在 tail position 的呼叫，而手動改寫可以重新組織程式邏輯來達成。
+
+##### 四版 quicksort 實驗
+
+為了驗證這兩個層次在 linked list quicksort 上的實際效果，實作四個版本並以 [Unity](https://github.com/ThrowTheSwitch/Unity) 驗證正確性（52 項測試全部通過）：
+
+```c
+/* Version 1: 教材原版——兩個遞迴呼叫 */
+void qsort_original(node_t **list) {
+    /* ... partition ... */
+    qsort_original(&left);
+    qsort_original(&right);
+    /* concat left + pivot + right */
+}
+```
+
+```c
+/* Version 2: linD026 的 quicksort_tco——跳過空 partition 的遞迴 */
+void qsort_tco(node_t **list) {
+    /* ... partition ... */
+    if (!left && right) {
+        /* 只遞迴 right */
+    } else if (left && right) {
+        /* 兩邊都遞迴 */
+    } else if (left && !right) {
+        /* 只遞迴 left */
+    } /* else: 只有 pivot */
+}
+```
+
+```c
+/* Version 3: 清大教材策略——遞迴較小半，迴圈處理較大半 */
+void qsort_method2(node_t **list) {
+    node_t *suffix = NULL;
+    while (*list) {
+        /* ... partition, count lc/rc ... */
+        if (lc <= rc) {
+            qsort_method2(&left);   /* 遞迴小的 */
+            /* concat + 迴圈繼續 sort right */
+        } else {
+            qsort_method2(&right);  /* 遞迴小的 */
+            /* 把 pivot+sorted_right 存入 suffix */
+            /* 迴圈繼續 sort left */
+        }
+    }
+    *list = suffix;  /* 接上暫存的尾段 */
+}
+```
+
+```c
+/* Version 4: 完全無遞迴——顯式 stack (alienryderflex 風格) */
+void qsort_iterative(node_t **list) {
+    node_t *stack[256];
+    int top = 0;
+    stack[top++] = *list;
+    node_t *result = NULL, **rtail = &result;
+    while (top > 0) {
+        node_t *sub = stack[--top];
+        if (!sub->next) {           /* 單節點：直接接到 result */
+            *rtail = sub; rtail = &sub->next;
+            continue;
+        }
+        /* partition, push right/pivot/left (pop 順序 = left/pivot/right) */
+    }
+    *list = result;
+}
+```
+
+Version 3 的 `suffix` 技巧值得說明：當較大半是 left 時，無法用 `list = tail` 的尾端接續技巧（因為 left 在結果前端），改為把「pivot → sorted_right」暫存到 `suffix`，迴圈結束後再接上。
+
+##### 組合語言分析
+
+檢查 GCC 13.3.0 `-O2` 產生的組合語言（`qsort_impl_O2.s`），計算每個版本的 `call` 指令數量：
+
+| 版本 | `call` 指令數 | 說明 |
+|------|-------------|------|
+| `qsort_original` | 2 | 兩個遞迴，都不在 tail position |
+| `qsort_tco` | 4 | if/else 四個分支各有遞迴呼叫 |
+| `qsort_method2` | 2 | 兩個分支各一個遞迴（每次只遞迴較小半） |
+| `qsort_iterative` | 0 | 完全無遞迴 |
+
+GCC **未對任何版本**自動進行 TCO。即使將遞迴呼叫移到 tail position（如先前實驗的 `qsort_tailcall` 版本），函式內的 stack-allocated 區域變數（`left`、`right`、`result`）加上 stack canary 檢查，使 GCC 無法安全地重用 stack frame。對 linked list quicksort 而言，編譯器自動 TCO 實際上**不適用**——必須靠手動改寫。
+
+##### 效能量化
+
+三台機器上各跑 1000 trials（n=10000），每 10 trials 取平均：
+
+![Quicksort benchmark across 3 machines](https://raw.githubusercontent.com/laneser/linux2026hackmd/main/qsort_bench.svg)
+
+三台機器的絕對時間差距很大（Ryzen 9800X3D ~0.6 ms vs RPi 3B ~7 ms），但四個版本的**相對排名在三台機器上完全一致**，且 `-O0` 與 `-O3` 不改變排名：
+
+| 排名 | 版本 | 策略 | Stack 最壞 |
+|-----|------|------|-----------|
+| 1 | `qsort_iterative` | 顯式 stack，零遞迴 | O(n)* |
+| 2 | `qsort_method2` | 遞迴較小半，迴圈較大半 | **O(log n)** |
+| 3 | `qsort_original` | 兩邊遞迴 | O(n) |
+| 4 | `qsort_tco` | 跳過空 partition | O(n) |
+
+\* `qsort_iterative` 的顯式 stack 大小固定為 256，足以處理 2^256 個元素；實務上等同 O(1)。若搭配 Method I 的「push 較小半」策略，可保證只需 O(log n) 個 stack entries。
+
+`qsort_iterative` 最快的原因：沒有函式呼叫開銷，且用 `result_tail` 指標 O(1) 追加結果，省去 `list_concat` 的走訪。`qsort_tco`（linD026）反而最慢：四個 if/else 分支帶來額外的分支預測壓力和重複的 `list_concat` 呼叫，卻完全沒有減少遞迴深度。
+
+##### 回應老師的問題：GCC 對 TCO 具體做了什麼
+
+老師的回饋要求說明「編譯器具體做了什麼」。答案分兩個層次：
+
+**GCC 自動 TCO 的機制（`-foptimize-sibling-calls`）：** 當遞迴呼叫滿足以下條件時，GCC 將 `call` 替換為 `jmp`，重用當前 stack frame：
+
+1. 呼叫位於 tail position（之後沒有任何操作）
+2. 被呼叫函式的參數不引用 caller 的 stack frame
+3. caller 的 stack frame 可以安全釋放（無需 stack canary 保護的區域變數）
+
+**對 linked list quicksort 的實際結果：** GCC 的自動 TCO 在此**不適用**。即使手動把第二個遞迴呼叫移到 tail position，函式內的區域變數（`left`、`right`、`pivot` 等）使得 stack frame 無法重用。這意味著 linked list quicksort 的 stack depth 改善**只能靠手動改寫**——正是清大教材 Method I/II 所描述的演算法層級策略。
+
+`qsort_method2` 的實作展示了這一點：透過比較 partition 大小、只遞迴較小半（保證 ≤ n/2），手動確保遞迴深度 ≤ log₂n。這是演算法設計者的責任，不能依賴編譯器。
+
+##### linD026 題解的問題
+
+linD026 將其改寫命名為 `quicksort_tco`，但名稱有誤導：
+
+| | 做了什麼 | 效果 |
+|---|---|---|
+| **清大教材 Method I/II** | 對較小 partition 遞迴，較大的迴圈處理 | Stack depth O(log n) |
+| **GCC 自動 TCO** | 將 tail position 的 `call` 替換為 `jmp` | 重用 stack frame |
+| **linD026 `quicksort_tco`** | 分出 left/right 為空的四種情況 | 省掉對空串列的 `call`（early termination） |
+
+linD026 的版本既沒有「選較小 partition 遞迴」（教材策略），也沒有任何 `call` 在 tail position（編譯器 TCO）。它做的只是 early termination——跳過空 partition 的遞迴呼叫——不改變 stack depth 的漸近行為，實測反而因額外的分支判斷而比原版更慢。
+
+題解的效能比較聲稱「迴圈版本自製的 stack，其效能無法與被編譯器最佳化過的其他兩個版本相比」，但此處的「編譯器最佳化」指的是 `-O3` 的一般性改善（inlining、register allocation 等），並非 TCO。本實驗在三台機器上的結果恰好相反：`qsort_iterative`（完全迴圈化）是四個版本中最快的。
+
 ---
 
 ## 參考資料
