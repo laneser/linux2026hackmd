@@ -1397,7 +1397,7 @@ Client code 只看到 `struct opaque *`，編譯後的 binary 只包含指標操
 
 當 struct 內部需要修改（新增成員、調整順序、改變大小）時，只需重新編譯 library，client code 不用重新編譯——因為 client 的 binary 從未依賴 struct 的大小或佈局，只依賴指標大小。這就是 binary compatibility。
 
-Linux 核心中可以找到這個模式的實例。例如 [`include/linux/cdev.h:10-12`](https://github.com/torvalds/linux/blob/v6.13/include/linux/cdev.h#L10-L12) 以 forward declaration 宣告 `struct file_operations`、`struct inode`、`struct module`，使 `cdev` 子系統的 header 不需引入整個 `fs.h`；[`include/linux/net.h:29-33`](https://github.com/torvalds/linux/blob/v6.13/include/linux/net.h#L29-L33) 同樣 forward declare `struct inode`、`struct file`、`struct net` 等，讓 socket 子系統僅透過指標操作這些型別。
+Linux 核心中可以找到這個模式的實例。例如 [`include/linux/cdev.h:10-12`](https://github.com/torvalds/linux/blob/v6.19/include/linux/cdev.h#L10-L12) 以 forward declaration 宣告 `struct file_operations`、`struct inode`、`struct module`，使 `cdev` 子系統的 header 不需引入整個 `fs.h`；[`include/linux/net.h:29-33`](https://github.com/torvalds/linux/blob/v6.19/include/linux/net.h#L29-L33) 同樣 forward declare `struct inode`、`struct file`、`struct net` 等，讓 socket 子系統僅透過指標操作這些型別。
 
 #### 3. 為何 incomplete type 只能搭配 pointer？
 
@@ -3054,6 +3054,87 @@ weihsinyeh 觀察到 Galloping mode 使比較次數增加而非減少，並歸�
 **2. 若能輔以真實核心工作負載數據，分析會更完整**
 
 weihsinyeh 的分析停留在 userspace benchmark，使用隨機或人工構造的輸入。如題目 6 的 kernel instrumentation histogram 所示，核心中 `list_sort` 的呼叫分佈極度不均：99.5% 的呼叫來自 `__xfs_trans_commit`、只排序 3-7 個元素，但 CIL checkpoint（`xlog_cil_push_work`）單次處理 ~3,000 個元素、~220 個 runs。這類真實數據對於評估改進方案（包括 Galloping mode）的實際效益至關重要——在 n=5 的串列上差異微乎其微，但在 n=3,000 的 CIL checkpoint 上，run detection 可減少約 33% 比較次數。建議未來的改進分析可透過 debugfs instrumentation 收集核心實際呼叫的串列規模和有序程度，作為效能評估的依據。
+
+## 細讀〈[Linux: 作業系統術語及概念](https://hackmd.io/@sysprog/linux-concepts)〉
+
+### 頻繁系統呼叫是否等同於繞過 user/kernel 隔離
+
+- [ ] 若一個惡意應用程式成功觸發多次系統呼叫並頻繁進入核心態，是否等同於繞過 user/kernel 隔離？分析：CPU privilege level、page table 權限位元、系統呼叫機制的作用和考量
+
+答案是**否**——頻繁進入核心態不等於繞過隔離，因為每次系統呼叫的進入和返回都經過硬體強制的權限轉換，呼叫次數多寡不影響隔離的完整性。以下從三個層面分析。
+
+#### CPU privilege level：每次進入都重新建立隔離
+
+x86_64 的 `syscall` 指令將 CPU 從 Ring 3（user mode）切換至 Ring 0（kernel mode），此轉換由硬體執行，軟體無法跳過。在 Linux 核心中，系統呼叫的入口 [`arch/x86/entry/entry_64.S`](https://github.com/torvalds/linux/blob/v6.19/arch/x86/entry/entry_64.S#L88) 第 88-95 行：
+
+```
+SYM_CODE_START(entry_SYSCALL_64)
+    swapgs
+    movq  %rsp, PER_CPU_VAR(cpu_tss_rw + TSS_sp2)
+    SWITCH_TO_KERNEL_CR3 scratch_reg=%rsp
+    movq  PER_CPU_VAR(cpu_current_top_of_stack), %rsp
+```
+
+- `swapgs`（第 92 行）：切換 GS segment base 至核心空間，使核心能存取 per-CPU 資料
+- `SWITCH_TO_KERNEL_CR3`（第 95 行）：切換 CR3 暫存器至核心 page table
+
+返回時（同檔案第 159-167 行），`SWITCH_TO_USER_CR3_STACK` 和 `swapgs` 反向執行，恢復使用者態的 page table 和 GS base。這兩個步驟在**每次**系統呼叫的進入和返回都會執行，無論呼叫頻率多高，硬體轉換不可省略。
+
+#### Page table 權限位元：KPTI 確保使用者態看不到核心記憶體
+
+Linux 自 4.15 起實作 Kernel Page Table Isolation（KPTI），維護兩套 page table：核心態用完整 page table，使用者態只能看到使用者空間的映射。`SWITCH_TO_KERNEL_CR3` 的實作位於 [`arch/x86/entry/calling.h`](https://github.com/torvalds/linux/blob/v6.19/arch/x86/entry/calling.h#L167) 第 167-179 行：
+
+```
+.macro ADJUST_KERNEL_CR3 reg:req
+    ALTERNATIVE "", "SET_NOFLUSH_BIT \reg", X86_FEATURE_PCID
+    andq  $(~PTI_USER_PGTABLE_AND_PCID_MASK), \reg
+.endm
+
+.macro SWITCH_TO_KERNEL_CR3 scratch_reg:req
+    ALTERNATIVE "jmp .Lend_\@", "", X86_FEATURE_PTI
+    mov   %cr3, \scratch_reg
+    ADJUST_KERNEL_CR3 \scratch_reg
+    mov   \scratch_reg, %cr3
+.endm
+```
+
+`ADJUST_KERNEL_CR3` 透過 `andq` 清除 PTI 位元，將 CR3 指向核心 page table。反之，使用者態的 page table 中核心區域不存在映射——即使惡意程式頻繁觸發系統呼叫，每次返回使用者態後，核心記憶體再次不可見。
+
+進一步地，[`arch/x86/mm/pti.c`](https://github.com/torvalds/linux/blob/v6.19/arch/x86/mm/pti.c#L164) 第 164-166 行還將使用者記憶體在核心 page table 中標記為 NX（不可執行），防止核心意外執行使用者程式碼。
+
+#### 系統呼叫機制的作用和考量：多層過濾與資源限制
+
+隔離不僅依賴硬體權限轉換，核心還在系統呼叫路徑上設置多層軟體防線。[`arch/x86/entry/syscall_64.c`](https://github.com/torvalds/linux/blob/v6.19/arch/x86/entry/syscall_64.c#L87) 第 90 行，**每次**系統呼叫都經過 `syscall_enter_from_user_mode()`，此函式檢查 [`include/linux/entry-common.h`](https://github.com/torvalds/linux/blob/v6.19/include/linux/entry-common.h#L33) 第 33-46 行定義的 7 種過濾旗標：
+
+```c
+#define SYSCALL_WORK_ENTER  (SYSCALL_WORK_SECCOMP |
+                 SYSCALL_WORK_SYSCALL_TRACEPOINT |
+                 SYSCALL_WORK_SYSCALL_TRACE |
+                 SYSCALL_WORK_SYSCALL_EMU |
+                 SYSCALL_WORK_SYSCALL_AUDIT |
+                 SYSCALL_WORK_SYSCALL_USER_DISPATCH |
+                 ARCH_SYSCALL_WORK_ENTER)
+```
+
+其中 **seccomp**（[`kernel/seccomp.c`](https://github.com/torvalds/linux/blob/v6.19/kernel/seccomp.c#L1259) 第 1259 行起的 `__seccomp_filter()`，違規處理於第 1355-1370 行）可限制行程只能呼叫白名單中的系統呼叫，違規直接 `SIGKILL`。容器執行環境（Docker, gVisor）普遍啟用 seccomp 來縮限攻擊面。
+
+針對「多個惡意行程同時發動」的場景，核心的防線不在於限制系統呼叫頻率本身，而是限制系統呼叫能取得的**資源**：
+
+- **`RLIMIT_NPROC`**：[`kernel/fork.c`](https://github.com/torvalds/linux/blob/v6.19/kernel/fork.c#L2091) 第 2091 行，`fork()` 時檢查使用者的行程數上限，超過則回傳 `-EAGAIN`，阻止 fork bomb
+- **`RLIMIT_CPU`**：同檔案第 1688 行，限制行程的 CPU 時間，超時送 `SIGKILL`
+- **OOM killer**：[`mm/oom_kill.c`](https://github.com/torvalds/linux/blob/v6.19/mm/oom_kill.c) 在記憶體耗盡時選擇並終止佔用最多資源的行程
+- **cgroups**：可對 CPU、記憶體、I/O 頻寬設定配額，限制一組行程的整體資源消耗
+
+#### 當系統被脅持時：硬體中斷是最後防線
+
+即使惡意行程成功消耗大量 CPU 資源，使用者仍可透過硬體中斷奪回控制權。鍵盤中斷（IRQ 1）由中斷控制器直接遞送至 CPU，不需經過任何使用者態行程的配合：
+
+- **Ctrl-C**：送 `SIGINT` 至前景行程群組，由終端驅動程式（tty layer）處理，不依賴目標行程的合作
+- **Magic SysRq**（[`drivers/tty/sysrq.c`](https://github.com/torvalds/linux/blob/v6.19/drivers/tty/sysrq.c)）：Alt+SysRq+組合鍵直接在中斷上下文中執行核心命令，可強制終止所有使用者行程（SysRq+i）、同步磁碟（SysRq+s）、重新開機（SysRq+b），即使系統幾乎無回應也能運作
+- **SSH 連線**：SSH 的封包由網路中斷觸發處理，獨立於本地行程排程。只要網路堆疊和 sshd 行程未被終止，遠端使用者可透過 SSH 登入後 `kill` 惡意行程
+- **搶佔式排程**（`CONFIG_PREEMPT`）：核心排程器透過 timer interrupt 強制搶佔執行過久的行程，確保其他行程（包括 sshd、終端驅動程式）有機會執行。即使在 `CONFIG_PREEMPT_NONE` 下，行程在從核心態返回使用者態時也會被搶佔
+
+真正的威脅不是「頻繁進入核心態」，而是**核心本身的漏洞**——例如 buffer overflow 讓攻擊者在 Ring 0 執行任意程式碼、修改 page table 權限、或停用中斷。這類攻擊繞過的不是系統呼叫機制的隔離，而是利用核心程式碼的缺陷突破隔離邊界本身。
 
 ---
 
