@@ -2946,7 +2946,7 @@ Full random 的 overhead 約 5-9%，來自 run boundary detection 的額外比�
 
 ##### 核心實際工作負載的 list_sort 輸入分佈
 
-為了驗證 run detection 在實際核心中的效益，在 lab-x86（x86_64, 2 cores, Ubuntu 24.04）上部署了 instrumentation-only patch。此 patch 不修改排序演算法本身，僅在 `list_sort()` 入口前掃描輸入串列的 natural run 數量，並透過 debugfs 介面（`/sys/kernel/debug/list_sort_stats/`）匯出統計資料。完整的 patch 腳本與工作負載測試程式位於 [`kernel_instrumentation_only_patch/`](https://github.com/laneser/linux2026_warmup/tree/main/listsort_timsort/kernel_instrumentation_only_patch)，包含：
+為了驗證 run detection 在實際核心中的效益，在 lab-x86（x86_64, 2 cores, Ubuntu 24.04）上部署了 instrumentation-only patch。此 patch 不修改排序演算法本身，僅在 `list_sort()` 入口前掃描輸入串列的 natural run 數量，並透過 debugfs 介面（`/sys/kernel/debug/list_sort_stats/`）匯出統計資料。完整的 patch 腳本與工作負載測試程式位於 [`kernel_instrumentation_only_patch/`](https://github.com/laneser/warmup/tree/main/listsort_timsort/kernel_instrumentation_only_patch)，包含：
 
 - `apply_instrumentation.sh` — 自動 patch 核心源碼（新增 `lib/list_sort_stats.{c,h}`、修改 `lib/list_sort.c`、`lib/Kconfig.debug`、`lib/Makefile`）
 - `run_workload.sh` — 建立 XFS/btrfs loop device 並執行 I/O 工作負載以觸發 `list_sort()`
