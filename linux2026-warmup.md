@@ -2644,7 +2644,7 @@ Version 3 的 `suffix` 技巧值得說明：當較大半是 left 時，無法用
 | `qsort_method2` | 2 | 兩個分支各一個遞迴（每次只遞迴較小半） |
 | `qsort_iterative` | 0 | 完全無遞迴 |
 
-GCC **未對任何版本**自動進行 TCO。即使將遞迴呼叫移到 tail position（如先前實驗的 `qsort_tailcall` 版本），函式內的 stack-allocated 區域變數（`left`、`right`、`result`）加上 stack canary 檢查，使 GCC 無法安全地重用 stack frame。對 linked list quicksort 而言，編譯器自動 TCO 實際上**不適用**——必須靠手動改寫。
+GCC **未對任何版本**自動進行 TCO。每個版本的遞迴函式都有 stack-allocated 區域變數（`left`、`right`、`pivot` 等），GCC 無法在 tail call 前安全釋放 stack frame。對 linked list quicksort 而言，編譯器自動 TCO 實際上**不適用**——必須靠手動改寫。
 
 ##### 效能量化
 
