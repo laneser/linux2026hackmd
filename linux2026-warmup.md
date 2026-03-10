@@ -2695,6 +2695,111 @@ linD026 的版本既沒有「選較小 partition 遞迴」（教材策略），�
 
 ---
 
+#### 題目 5
+
+> 題目：[2022q1 第 1 週測驗題](https://hackmd.io/@sysprog/linux2022-quiz1)（測驗 1–4：Two Sum hash table、Remove Duplicates、LRU Cache、Longest Consecutive Sequence）
+> 參考題解：[qwe661234](https://hackmd.io/@qwe661234/linux2022-quiz1)
+
+本題涵蓋四個子題，皆圍繞 hash table 與 linked list 的結合應用。參考題解的整體品質不錯：以 Graphviz 圖解資料結構、完成所有延伸問題、用 Valgrind 驗證記憶體洩漏修復、並以 Linux 核心風格的 `hlist` 重新實作測驗四。以下指出兩個程式正確性問題作為改進建議，以及一個筆誤。
+
+##### 建議改進 1：測驗二 circular doubly-linked list 遞迴版本的邏輯錯誤
+
+題解的遞迴版本缺少 `else`，導致重複節點被遞迴處理兩次：
+
+```c
+void deleteDuplicates(struct list_head *cur, struct list_head *head)
+{
+    if (cur == head)
+        return;
+    if (/* cur 是重複節點 */) {
+        deleteDuplicates(cur->next, head);
+        list_del(cur);
+    }
+    deleteDuplicates(cur->next, head);  /* 無 else → 重複節點多遞迴一次 */
+}
+```
+
+當 `cur` 滿足重複條件時，先在 `if` 內對 `cur->next` 遞迴，再對同一個 `cur->next` 重複遞迴。更嚴重的是，`list_del(cur)` 將 `cur->next` 設為 NULL，隨後 `dedup_recur_original(cur->next, head)` 等同於 `dedup_recur_original(NULL, head)`——NULL 不等於 `head` 所以不會 return，接著存取 `NULL->next` 直接 segfault。
+
+修正方式是加上 `else` 並調整順序——先保存 `next`，再刪除：
+
+```c
+void deleteDuplicates(struct list_head *cur, struct list_head *head)
+{
+    if (cur == head)
+        return;
+    struct list_head *next = cur->next;
+    if ((next != head &&
+         list_entry(cur, element_t, list)->value ==
+             list_entry(next, element_t, list)->value) ||
+        (cur->prev != head &&
+         list_entry(cur, element_t, list)->value ==
+             list_entry(cur->prev, element_t, list)->value)) {
+        deleteDuplicates(next, head);
+        list_del(cur);
+    } else {
+        deleteDuplicates(next, head);
+    }
+}
+```
+
+##### 建議改進 2：測驗二 iterative 版本對 sentinel head 做 `container_of`
+
+題解的迭代版本使用 `list_for_each_safe`，但在比較值時未檢查 `safe` 是否為 sentinel head：
+
+```c
+list_for_each_safe (cur, safe, head) {
+    if (list_entry(cur, element_t, list)->value ==
+        list_entry(safe, element_t, list)->value) {
+```
+
+[`list_for_each_safe`](https://github.com/torvalds/linux/blob/master/include/linux/list.h) 的展開為：
+
+```c
+for (pos = (head)->next, n = pos->next;
+     !list_is_head(pos, (head));
+     pos = n, n = pos->next)
+```
+
+當 `cur` 是串列中最後一個節點時，`safe == head`。此時 `list_entry(safe, element_t, list)` 對 sentinel head 執行 `container_of`——但 `head` 並非嵌入在 `element_t` 結構內，取出的 `->value` 是任意記憶體內容，屬於未定義行為。
+
+修正方式是在比較前加入 `safe != head` 的檢查：
+
+```c
+list_for_each_safe (cur, safe, head) {
+    if (safe != head &&
+        list_entry(cur, element_t, list)->value ==
+            list_entry(safe, element_t, list)->value) {
+```
+
+##### 筆誤：測驗四改進版的 `sizeof`
+
+題解的改進版將 `malloc(sizeof(*node))` 寫成 `malloc(sizeof(node))`——前者配置結構體大小（24 bytes），後者只配置指標大小（8 bytes）。以題解貼出的程式碼執行 Valgrind 會報告 55 個 `Invalid write`/`Invalid read` 錯誤，與題解展示的 0 errors 截圖矛盾；補回 `*` 後 Valgrind 結果為 0 errors，與截圖吻合。推論是貼程式碼時漏掉了 `*`。
+
+##### 以 Unity 測試驗證
+
+將上述兩個問題及修正版本分別實作，以 [Unity](https://github.com/ThrowTheSwitch/Unity) 測試框架驗證。完整程式碼見 [`quiz5_hashtable/`](https://github.com/laneser/warmup/tree/main/quiz5_hashtable)，`make report` 一次產出所有結果：
+
+```
+$ make report
+=== Fixed versions (9 tests) ===
+test_dedup_iter_fixed_last_unique:PASS
+...
+test_dedup_recur_fixed_no_dup:PASS
+9 Tests 0 Failures 0 Ignored
+
+=== Original iterative: ASan detects sentinel head UB ===
+ERROR: AddressSanitizer: stack-buffer-underflow on address ...
+SUMMARY: AddressSanitizer: stack-buffer-underflow dedup.h:68 in dedup_iter_original
+
+=== Original recursive: segfault (NULL deref after list_del) ===
+exit code: 139 (139 = segfault)
+```
+
+修正版 9 項全數通過；原始 iterative 版被 ASan 偵測到對 sentinel head 做 `container_of` 的越界讀取；原始 recursive 版因 `list_del` 後存取 `NULL->next` 而 segfault。
+
+---
+
 ## 參考資料
 
 - [1] SEI CERT C Coding Standard, "[INT13-C. Use bitwise operators only on unsigned operands](https://wiki.sei.cmu.edu/confluence/display/c/INT13-C.+Use+bitwise+operators+only+on+unsigned+operands)."
