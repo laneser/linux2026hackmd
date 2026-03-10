@@ -2798,6 +2798,186 @@ exit code: 139 (139 = segfault)
 
 修正版 9 項全數通過；原始 iterative 版被 ASan 偵測到對 sentinel head 做 `container_of` 的越界讀取；原始 recursive 版因 `list_del` 後存取 `NULL->next` 而 segfault。
 
+#### 題目 6
+
+> 題目：[2023q1 第 1 週測驗題](https://hackmd.io/@sysprog/linux2023-quiz1)（測驗 1：Quick sort on linked list、Hybrid sort）
+> 參考題解：[yanjiew1](https://hackmd.io/@yanjiew/linux2023q1-quiz1)
+
+- [ ] 引入 hybrid sort 策略並在 Linux 核心風格的 circular doubly-linked list 實作，量化性能表現並探討不同資料集的影響
+- [ ] 嘗試對 Linux 核心提出排序程式碼改進的貢獻
+
+##### Hybrid sort：將 Timsort 的 natural run detection 移植至 `list_sort`
+
+測驗 1 的延伸問題要求引入 hybrid sort 策略。參考題解的 yanjiew1 進一步撰寫了〈[Timsort 研究與對 Linux 核心貢獻嘗試](https://hackmd.io/@yanjiew/linux2023q1-timsort)〉，分析了 Timsort 對 merge sort 的三項改善——cache miss 降低、記憶體使用改善、比較次數減少——並嘗試在 Linux 核心的 linked list 上實作完整 Timsort。以下在 yanjiew1 的研究基礎上出發。
+
+[Timsort](https://en.wikipedia.org/wiki/Timsort) 的核心觀察是：真實資料往往部分有序，包含多段已排序的子序列（稱為 *natural runs*）。若排序演算法能偵測這些 runs 並直接利用，便可將比較次數從 $O(n \log n)$ 降至 $O(n \log r)$，其中 $r$ 是 natural runs 的數量。
+
+Linux 核心的 `list_sort`（[`lib/list_sort.c`](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c)）已是精心設計的 bottom-up merge sort——延遲合併策略保證至少 2:1 平衡、cache 友善、且比較次數接近理論下界。但它每次只將**單一元素**推入 pending stack，沒有利用輸入中既有的有序性。
+
+##### 修改策略
+
+yanjiew1 的研究指出完整 Timsort 在 linked list 上的挑戰：galloping mode 需要 random access、minrun 的 insertion sort 對鏈結串列改善有限、合併策略需維護額外的 runs stack。因此，僅從 Timsort 借用 natural run detection 機制，合併策略維持原本的 bit-counting scheme 不變。具體修改：
+
+1. **掃描 natural run**：每次從輸入取出一段最長的單調子序列，而非單一元素
+   - 升序 run：`cmp(cur, next) <= 0`（包含相等，維持穩定性）
+   - **嚴格**降序 run：`cmp(cur, next) > 0`（嚴格不等，反轉後不破壞穩定性）
+2. **就地反轉降序 run**：使其成為升序，三指標交換，$O(\text{run\_len})$
+3. **整段 run 推入 pending stack**：`count++` 計的是 run 數量而非元素數量
+4. **快速路徑**：若整個輸入只有一個 run（已排序或全反序），直接還原雙向鏈結，$O(n)$
+
+完整實作見 [`list_sort_runs.c`](https://github.com/laneser/warmup/blob/main/listsort_timsort/list_sort_runs.c)。`merge()` 和 `merge_final()` 與原版完全相同。
+
+##### 核心程式碼差異
+
+原版 `list_sort` 的主迴圈每次取一個元素：
+
+```c
+/* Move one element from input list to pending */
+list->prev = pending;
+pending = list;
+list = list->next;
+pending->next = NULL;
+count++;
+```
+
+修改後改為掃描整段 run：
+
+```c
+run_tail = list;
+if (run_tail->next && cmp(priv, run_tail, run_tail->next) > 0) {
+    /* Strictly descending run */
+    while (run_tail->next && cmp(priv, run_tail, run_tail->next) > 0)
+        run_tail = run_tail->next;
+    /* Reverse in-place */
+    ...
+} else {
+    /* Ascending run */
+    while (run_tail->next && cmp(priv, run_tail, run_tail->next) <= 0)
+        run_tail = run_tail->next;
+}
+next_list = run_tail->next;
+run_tail->next = NULL;
+/* Push entire run */
+list->prev = pending;
+pending = list;
+list = next_list;
+count++;
+```
+
+##### 為何不引入完整 Timsort
+
+yanjiew1 在〈[Timsort 研究與對 Linux 核心貢獻嘗試](https://hackmd.io/@yanjiew/linux2023q1-timsort)〉中分析了完整 Timsort 的三大機制：minrun 強制長度（以 insertion sort 補足短 run）、Fibonacci-like invariant 合併策略、以及 galloping mode。他指出在 linked list 上的挑戰：
+
+- **Galloping mode** 需要 random access（二分搜尋），鏈結串列只能循序走訪，無法受益
+- **Insertion sort 補短 run** 對鏈結串列的改善有限，反而增加程式碼複雜度
+- **合併策略改變** 需要額外的 stack 記錄每個 run 的大小，且會破壞現有 `list_sort` 經驗證的 worst-case 保證
+- **記憶體改善**（只合併重疊部分）在 linked list 上不適用——linked list 的 merge 本就是 in-place 操作
+
+因此，保留原本的 bit-counting 合併策略，只加入 run detection，是風險最低且效益明確的改動。
+
+##### Userspace benchmark
+
+為了在提交 kernel patch 之前驗證效果，建立 [standalone userspace benchmark](https://github.com/laneser/warmup/tree/main/listsort_timsort)，從 `lib/list_sort.c` 抽出 vanilla 版和 run detection 版，以 `clock_gettime(CLOCK_MONOTONIC)` 計時。測試四種 pattern：
+
+| Pattern | 說明 |
+|---------|------|
+| `full_random` | 均勻隨機值（對照基線） |
+| `random_asc_runs` | 隨機長度的升序 runs 拼接，runs 之間不保證有序 |
+| `random_desc_runs` | 隨機長度的降序 runs 拼接 |
+| `random_mixed_runs` | 隨機長度、隨機升序或降序的 runs 拼接 |
+
+每組 (pattern, n, variant) 執行 30 次取平均，`max_run_len` 控制隨機 run 的最大長度。
+
+##### 固定 max_run_len=64 的結果
+
+| Pattern | n=1,000 | n=10,000 | n=100,000 |
+|---------|---------|----------|-----------|
+| full_random | **-9.4%** | **-5.7%** | **-4.9%** |
+| random_asc_runs | **+37.1%** | **+24.6%** | **+18.6%** |
+| random_desc_runs | **+34.9%** | **+25.1%** | **+18.6%** |
+| random_mixed_runs | **+29.9%** | **+20.7%** | **+15.7%** |
+
+（正數為比較次數減少百分比，負數為 overhead）
+
+Full random 的 overhead 約 5-9%，來自 run boundary detection 的額外比較（每對相鄰元素多一次 `cmp`）。有 natural runs 的資料則獲得 15-37% 的比較次數減少。
+
+##### max_run_len sweep 分析
+
+進一步以 `max_run_len` ∈ {8, 32, 64, 128, 256} 測試，觀察 run 長度對改善的敏感度（n=10,000）：
+
+| max_run_len | random_asc_runs | random_desc_runs | random_mixed_runs |
+|-------------|-----------------|------------------|-------------------|
+| 8 | +7.4% | +7.3% | +3.4% |
+| 32 | +18.6% | +18.7% | +14.7% |
+| 64 | +24.6% | +25.1% | +20.7% |
+| 128 | +31.3% | +31.7% | +27.2% |
+| 256 | +38.8% | +38.6% | +34.5% |
+
+觀察：
+
+- **Run 越長，改善越大**：符合 $O(n \log r)$ 的預測——run 長度增加意味著 run 數量 $r$ 減少
+- **Full random overhead 不受 max_run_len 影響**：固定 ~5%，因為隨機資料幾乎沒有長度 > 2 的 natural runs
+- **升序與降序改善幾乎相同**：降序 run 的反轉是 $O(\text{run\_len})$ 的指標操作，不涉及比較
+- **Mixed runs 改善略低**：升降交界處多一次方向判斷比較
+
+##### 核心中 `list_sort` 的呼叫者分析
+
+要評估此修改是否值得提交 patch，須確認核心中的 `list_sort` 呼叫者是否經常處理部分有序的資料。搜尋 v6.19 原始碼，`list_sort` 有約 30 個呼叫點，按輸入有序性分類：
+
+**高度可能部分有序（檔案系統 metadata、I/O 操作）：**
+
+| 呼叫點 | 排序對象 | 理由 |
+|--------|---------|------|
+| [`fs/gfs2/lops.c`](https://github.com/torvalds/linux/blob/v6.19/fs/gfs2/lops.c) | buffer data blocks | 交易期間寫入的 block 因 extent-based I/O 而傾向連續 |
+| [`fs/btrfs/tree-log.c`](https://github.com/torvalds/linux/blob/v6.19/fs/btrfs/tree-log.c) | extent mappings | inode 的 extent 通常按起始位置有序 |
+| [`fs/ext4/fsmap.c`](https://github.com/torvalds/linux/blob/v6.19/fs/ext4/fsmap.c) | metadata extents | 按 group 依序建構，inherent partial order |
+| [`fs/xfs/xfs_buf.c`](https://github.com/torvalds/linux/blob/v6.19/fs/xfs/xfs_buf.c) | buffer objects (by block number) | writeout 累積的 buffer 傾向按 block 位址有序 |
+| [`fs/ubifs/replay.c`](https://github.com/torvalds/linux/blob/v6.19/fs/ubifs/replay.c) | journal replay entries | 掃描 journal 時已按 sequence number 部分有序 |
+| [`drivers/md/raid5.c`](https://github.com/torvalds/linux/blob/v6.19/drivers/md/raid5.c) | stripe operations (by sector) | I/O 模式導致 sector 有局部性 |
+
+**不太可能有序（transaction items、裝置列舉）：**
+
+| 呼叫點 | 排序對象 | 理由 |
+|--------|---------|------|
+| [`fs/xfs/xfs_trans.c`](https://github.com/torvalds/linux/blob/v6.19/fs/xfs/xfs_trans.c) | log items | 動態加入，順序反映操作時序而非邏輯順序 |
+| [`drivers/acpi/nfit/core.c`](https://github.com/torvalds/linux/blob/v6.19/drivers/acpi/nfit/core.c) | DIMM descriptions | 來自 ACPI table，順序任意 |
+
+檔案系統子系統佔了 `list_sort` 呼叫者的多數，而這些場景的資料因 extent-based allocation 和 sequential I/O 模式，天然地傾向部分有序。這意味著 run detection 在實際核心工作負載中確實有改善空間。
+
+##### 核心實際工作負載的 list_sort 輸入分佈
+
+為了驗證 run detection 在實際核心中的效益，在 lab-x86（x86_64, 2 cores, Ubuntu 24.04）上部署了 instrumentation-only patch。此 patch 不修改排序演算法本身，僅在 `list_sort()` 入口前掃描輸入串列的 natural run 數量，並透過 debugfs 介面（`/sys/kernel/debug/list_sort_stats/`）匯出統計資料。完整的 patch 腳本與工作負載測試程式位於 [`kernel_instrumentation_only_patch/`](https://github.com/laneser/linux2026_warmup/tree/main/listsort_timsort/kernel_instrumentation_only_patch)，包含：
+
+- `apply_instrumentation.sh` — 自動 patch 核心源碼（新增 `lib/list_sort_stats.{c,h}`、修改 `lib/list_sort.c`、`lib/Kconfig.debug`、`lib/Makefile`）
+- `run_workload.sh` — 建立 XFS/btrfs loop device 並執行 I/O 工作負載以觸發 `list_sort()`
+
+具體做法：在 `lib/list_sort.c` 的 `list_sort()` 開頭（串列轉為 singly-linked 之前）插入 O(n) 掃描，計算 ascending/descending run 數量，呼叫 `list_sort_stats_record()` 記錄至全域 atomic counter。以 v6.19 核心源碼為基礎，加上 `CONFIG_LIST_SORT_STATS=y` 編譯選項，在 devcontainer（16 cores）交叉編譯後安裝至 lab-x86。
+
+測試方法：建立 512MB loop device，分別以 XFS 和 btrfs 格式化，執行四種工作負載（mass file creation、random writes、metadata scan、mass deletion），每階段 30 秒。
+
+**XFS 結果：**
+
+| 工作負載 | 呼叫次數 | 總元素數 | 平均元素數 | 總 runs | runs ratio | already sorted |
+|---------|---------|---------|-----------|--------|------------|----------------|
+| 檔案建立 (2,678 files) | 13,466 | 67,907 | 5 | 19,224 | 28.30% | 79.9% |
+| 隨機寫入 (6,811 writes) | 17 | 79 | 4 | 32 | 40.50% | 70.6% |
+| Metadata 掃描 (74 scans) | 1 | 4 | 4 | 1 | 25.00% | 100% |
+| 檔案刪除 | 13,526 | 73,366 | 5 | 21,178 | 28.86% | 67.9% |
+
+ascending runs 佔所有 runs 的 84-85%（如 file creation 中 16,322 asc vs 2,902 desc），符合 XFS 以 transaction commit 順序產生 log items 的特性。
+
+**btrfs 結果：** 所有工作負載的 `list_sort()` 呼叫次數均為 0。btrfs 的排序由其 B-tree 結構內部處理，v6.19 中 btrfs 的 `list_sort()` 呼叫點（[`tree-log.c`](https://github.com/torvalds/linux/blob/v6.19/fs/btrfs/tree-log.c)、[`raid56.c`](https://github.com/torvalds/linux/blob/v6.19/fs/btrfs/raid56.c)、[`block-group.c`](https://github.com/torvalds/linux/blob/v6.19/fs/btrfs/block-group.c)、[`volumes.c`](https://github.com/torvalds/linux/blob/v6.19/fs/btrfs/volumes.c)）在基本 I/O 操作中不被觸發。
+
+##### 小結
+
+Kernel instrumentation 揭示了一個關鍵事實：**XFS 的 `list_sort()` 呼叫以極短串列為主（平均 5 個元素），且 68-80% 的呼叫已經完全有序**（only 1 run）。
+
+這意味著 run detection 的 O(n) 前掃描在這些場景中雖然 overhead 很小（n ≈ 5），但改善空間也極為有限——5 個元素的 merge sort 本身只需約 8 次比較（$5 \log_2 5 \approx 11.6$），即使輸入完全有序也只能省下幾次比較。
+
+Natural run detection 的修改量約 30 行（不含 instrumentation），對已排序或部分有序的輸入能將比較次數從 $O(n \log n)$ 降至 $O(n \log r)$，worst case 仍為 $O(n \log n)$ 加上約 5% overhead。**Userspace benchmark 的大串列（n=1,000-100,000）驗證了演算法層面的顯著改善，但核心實測顯示主要呼叫者的串列規模過小，run detection 的實際效益有限。**
+
+這個結果與 yanjiew1 的研究方向一致：理論上 run detection 對部分有序輸入有效，但實際核心工作負載的串列規模是決定性因素。若未來核心出現大規模串列排序的 hot path（如大量 extent 的 defragmentation），run detection 將能發揮其優勢。
+
 ---
 
 ## 參考資料
