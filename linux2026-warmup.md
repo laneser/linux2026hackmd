@@ -2953,30 +2953,107 @@ Full random 的 overhead 約 5-9%，來自 run boundary detection 的額外比�
 
 具體做法：在 `lib/list_sort.c` 的 `list_sort()` 開頭（串列轉為 singly-linked 之前）插入 O(n) 掃描，計算 ascending/descending run 數量，呼叫 `list_sort_stats_record()` 記錄至全域 atomic counter。以 v6.19 核心源碼為基礎，加上 `CONFIG_LIST_SORT_STATS=y` 編譯選項，在 devcontainer（16 cores）交叉編譯後安裝至 lab-x86。
 
-測試方法：建立 512MB loop device，分別以 XFS 和 btrfs 格式化，執行四種工作負載（mass file creation、random writes、metadata scan、mass deletion），每階段 30 秒。
+測試方法：建立 512MB loop device，分別以 XFS 和 btrfs 格式化，執行四種工作負載（mass file creation、random writes、metadata scan、mass deletion），每階段 30 秒。初版 instrumentation 僅記錄全域平均值，得到「平均 5 個元素」的結論；但平均值會掩蓋分佈的細節，因此改為 histogram bucket 版本，以 `[0,10)`, `[10,100)`, `[100,1000)`, `[1000,5000)`, `[5000,10000)`, `[10000,+∞)` 六個區間分別記錄呼叫次數、元素數、run 數與 already-sorted 比例。同時將 `__builtin_return_address(0)` 改為 `__builtin_return_address(1)` 以辨識 `list_sort()` 的實際呼叫者（level 0 只會回傳 `list_sort` 自身的位址）。
 
-**XFS 結果：**
+**XFS 檔案建立階段（30 秒，建立 2,773 個檔案）：**
 
-| 工作負載 | 呼叫次數 | 總元素數 | 平均元素數 | 總 runs | runs ratio | already sorted |
-|---------|---------|---------|-----------|--------|------------|----------------|
-| 檔案建立 (2,678 files) | 13,466 | 67,907 | 5 | 19,224 | 28.30% | 79.9% |
-| 隨機寫入 (6,811 writes) | 17 | 79 | 4 | 32 | 40.50% | 70.6% |
-| Metadata 掃描 (74 scans) | 1 | 4 | 4 | 1 | 25.00% | 100% |
-| 檔案刪除 | 13,526 | 73,366 | 5 | 21,178 | 28.86% | 67.9% |
+| 區間 | 呼叫次數 | 總元素數 | 總 runs | already sorted | 平均元素數 |
+|------|---------|---------|---------|----------------|-----------|
+| [0,10) | 13,871 | 66,344 | 19,380 | 79% | 4 |
+| [10,100) | 71 | 767 | 125 | 61% | 10 |
+| [100,1000) | 1 | 172 | 73 | 0% | 172 |
+| [1000,5000) | 1 | 2,991 | 221 | 0% | 2,991 |
 
-ascending runs 佔所有 runs 的 84-85%（如 file creation 中 16,322 asc vs 2,902 desc），符合 XFS 以 transaction commit 順序產生 log items 的特性。
+per-caller breakdown：
+
+| 呼叫者 | 呼叫次數 | avg 元素 | avg runs | max 元素 |
+|--------|---------|---------|---------|---------|
+| `__xfs_trans_commit` | 13,939 | 4 | 1 | 14 |
+| `xfs_rmap_update_create_intent` | 3 | 2 | 1 | 3 |
+| `xlog_cil_push_work` | 1 | 2,991 | 221 | 2,991 |
+| `xfs_buf_delwri_submit_nowait` | 1 | 172 | 73 | 172 |
+
+**XFS 檔案刪除階段：**
+
+| 區間 | 呼叫次數 | 總元素數 | 總 runs | already sorted | 平均元素數 |
+|------|---------|---------|---------|----------------|-----------|
+| [0,10) | 13,984 | 69,480 | 20,853 | 69% | 4 |
+| [10,100) | 15 | 173 | 37 | 26% | 11 |
+| [1000,5000) | 2 | 5,816 | 495 | 0% | 2,908 |
+
+per-caller breakdown：
+
+| 呼叫者 | 呼叫次數 | avg 元素 | avg runs | max 元素 |
+|--------|---------|---------|---------|---------|
+| `__xfs_trans_commit` | 13,995 | 4 | 1 | 15 |
+| `xfs_extent_free_create_intent` | 4 | 4 | 1 | 4 |
+| `xlog_cil_push_work` | 1 | 2,947 | 306 | 2,947 |
+| `xlog_cil_committed` | 1 | 2,869 | 189 | 2,869 |
+
+Histogram 揭示了「平均 5 個元素」的統計假象：99.5% 的呼叫來自 `__xfs_trans_commit`（每次 transaction commit 排序 3-7 個 log items），但少數關鍵呼叫處理的串列規模完全不同：
+
+- **`xlog_cil_push_work`**（CIL checkpoint）：將多筆 transaction 累積的 log vectors 批次排序後寫入 log，一次呼叫處理 ~3,000 個元素、~220-300 個 runs。CIL checkpoint 的觸發頻率取決於 log 緩衝區填滿速度，在密集 I/O 下每數秒觸發一次。
+- **`xfs_buf_delwri_submit_nowait`**（buffer writeback）：將 dirty buffer 按 block number 排序後提交 I/O，觀測到 172 個元素、73 個 runs。
+- **`xlog_cil_committed`**（CIL commit 完成回呼）：處理 ~2,900 個元素、~189 個 runs。
 
 **btrfs 結果：** 所有工作負載的 `list_sort()` 呼叫次數均為 0。btrfs 的排序由其 B-tree 結構內部處理，v6.19 中 btrfs 的 `list_sort()` 呼叫點（[`tree-log.c`](https://github.com/torvalds/linux/blob/v6.19/fs/btrfs/tree-log.c)、[`raid56.c`](https://github.com/torvalds/linux/blob/v6.19/fs/btrfs/raid56.c)、[`block-group.c`](https://github.com/torvalds/linux/blob/v6.19/fs/btrfs/block-group.c)、[`volumes.c`](https://github.com/torvalds/linux/blob/v6.19/fs/btrfs/volumes.c)）在基本 I/O 操作中不被觸發。
 
 ##### 小結
 
-Kernel instrumentation 揭示了一個關鍵事實：**XFS 的 `list_sort()` 呼叫以極短串列為主（平均 5 個元素），且 68-80% 的呼叫已經完全有序**（only 1 run）。
+Histogram 版本的 kernel instrumentation 揭示了僅看全域平均值會誤判 run detection 的價值：
 
-這意味著 run detection 的 O(n) 前掃描在這些場景中雖然 overhead 很小（n ≈ 5），但改善空間也極為有限——5 個元素的 merge sort 本身只需約 8 次比較（$5 \log_2 5 \approx 11.6$），即使輸入完全有序也只能省下幾次比較。
+**99.5% 的呼叫無關緊要：** `__xfs_trans_commit` 每次只排序 3-7 個 log items，且 79% 已完全有序。對這些呼叫而言，任何改善策略的效果都微乎其微——5 個元素的排序本身只需約 8 次比較。
 
-Natural run detection 的修改量約 30 行（不含 instrumentation），對已排序或部分有序的輸入能將比較次數從 $O(n \log n)$ 降至 $O(n \log r)$，worst case 仍為 $O(n \log n)$ 加上約 5% overhead。**Userspace benchmark 的大串列（n=1,000-100,000）驗證了演算法層面的顯著改善，但核心實測顯示主要呼叫者的串列規模過小，run detection 的實際效益有限。**
+**少數呼叫是真正的改善目標：** `xlog_cil_push_work` 處理 ~3,000 個元素、~220 個 runs。對此呼叫，run detection 可將比較次數從 $O(n \log n) \approx 3000 \times 11.5 \approx 34{,}500$ 降至 $O(n \log r) \approx 3000 \times \log_2 220 \approx 23{,}000$，減少約 33%。類似地，`xfs_buf_delwri_submit_nowait` 的 172 元素、73 runs 也能從 run detection 獲益。
 
-這個結果與 yanjiew1 的研究方向一致：理論上 run detection 對部分有序輸入有效，但實際核心工作負載的串列規模是決定性因素。若未來核心出現大規模串列排序的 hot path（如大量 extent 的 defragmentation），run detection 將能發揮其優勢。
+Natural run detection 的修改量約 30 行（不含 instrumentation），worst case 仍為 $O(n \log n)$ 加上約 5% overhead（O(n) 前掃描）。**Userspace benchmark 的大串列（n=1,000-100,000）驗證了演算法層面的顯著改善；核心 histogram 數據進一步顯示，雖然大多數呼叫的串列過小以致改善有限，但 CIL checkpoint 等低頻大串列呼叫正是 run detection 能發揮作用的場景。**
+
+#### 題目 7
+
+> 題目：[2024q1 第 1 週測驗題](https://hackmd.io/@sysprog/linux2024-quiz1)（測驗 2：Timsort 鏈結串列實作）
+> 參考題解：[weihsinyeh](https://hackmd.io/@weihsinyeh/ry2RWmNTT)
+
+- [ ] 解釋 Timsort 程式碼的運作原理，提出改進方案並予以實作
+- [ ] 將改進過的 Timsort 實作整合進 sysprog21/lab0-c，設計效能評比的測試程式
+
+##### 選擇題作答
+
+測驗 2 的程式碼是基於 Linux 核心 `list_sort` 的 `merge` / `merge_final` 函式，加上 Timsort 的 `find_run` / `merge_collapse` / `merge_force_collapse` 框架。填空處：
+
+- `AAAA`：`&head`（`merge` 中 tail 指標的初始化，指向 head 變數的位址）
+- `BBBB`：`&a->next`（取 a 節點的 next 指標位址，作為下一個 tail）
+- `CCCC`：`&b->next`（同理，取 b 節點的 next 指標位址）
+- `DDDD`：`tail->next`（`build_prev_link` 結尾，最後一個節點的 next 指向 head）
+- `EEEE`：`head->prev`（head 的 prev 指向最後一個節點，完成環狀結構）
+- `FFFF`：`1`（若 stack 只剩 1 個 run，不需 merge，直接 `build_prev_link` 還原雙向環狀結構）
+
+`AAAA`~`CCCC` 與核心 `lib/list_sort.c` 的 `merge()` 函式（[第 17 行](https://github.com/torvalds/linux/blob/v6.19/lib/list_sort.c#L17)）使用相同的 indirect pointer 技巧：`struct list_head **tail = &head` 讓 `*tail = a` 同時完成「設定 head」和「接續鏈結」兩個動作，不需額外的 if 判斷。
+
+##### 與題目 6 的關係
+
+本題的 Timsort 實作包含完整的 `find_run`（偵測 ascending/descending run 並反轉 descending）、`merge_collapse`（維護 stack 上 runs 的 Fibonacci-like 不變式）、galloping-free 的 `merge`。這與題目 6 中我們將 natural run detection 移植至 `list_sort` 的方向一致，但架構不同：
+
+| 面向 | 題目 6（我們的實作） | 題目 7（本題 Timsort） |
+|------|---------------------|----------------------|
+| 基礎框架 | 核心 `list_sort` 的 bit-counting merge scheduling | Timsort 的 stack-based merge policy |
+| Run 偵測 | 在 `list_sort` 主迴圈中偵測，整段 run 一次推入 | 獨立的 `find_run` 函式 |
+| Merge 時機 | 原有的 `count` bit 規則（至少 2:1 平衡） | `merge_collapse` 的三條件不變式 |
+| Descending run | 偵測後 in-place 反轉 | 同 |
+| Run size 儲存 | 無需額外儲存（已由 merge scheduling 管理） | 將 `len` 塞入 `head->next->prev`（型別雙關） |
+
+兩者本質上都是「偵測 natural runs 以減少不必要的 merge」，差異在於 merge scheduling 策略。核心 `list_sort` 的 bit-counting 方式已證明比較次數接近理論下界（見 [commit b5c56e0](https://github.com/torvalds/linux/commit/b5c56e0cdd62979dd538e5363b06be5bdf735a09) 引用的三篇論文），因此題目 6 選擇保留原有框架並僅加入 run detection，而非替換為完整 Timsort。
+
+##### 參考題解評論
+
+weihsinyeh 的題解對 `find_run`、`run_size`、`merge_at`、`merge_collapse` 的運作原理有詳細的圖解說明，並嘗試實作 Galloping mode 作為改進方案。以下就 Galloping mode 的分析提出兩點補充建議：
+
+**1. Galloping mode 在鏈結串列上失效的根本原因**
+
+weihsinyeh 觀察到 Galloping mode 使比較次數增加而非減少，並歸因於交替出現的 worst case。更根本的原因是：Galloping mode 的設計前提是 O(1) random access——exponential search 需要 $O(\log k)$ 次跳躍找到區間 $[2^{k-1}, 2^k]$，再用 binary search 定位，總計 $O(\log k)$ 次比較即可跳過 $k$ 個元素。然而鏈結串列不支援 O(1) random access，exponential search 的每次「跳躍」實際上需要逐節點走訪，退化為 O(k) 線性掃描，與逐對合併相比沒有減少走訪量，反而因額外的簿記邏輯增加了比較次數。這解釋了為何 weihsinyeh 的 cachegrind 測試中 Linux 原版的 miss 次數反而略少——galloping 的額外指標操作增加了 data cache 壓力，但在鏈結串列的非連續記憶體配置下，差異很小（D1 miss rate 同為 1.3%）。
+
+**2. 若能輔以真實核心工作負載數據，分析會更完整**
+
+weihsinyeh 的分析停留在 userspace benchmark，使用隨機或人工構造的輸入。如題目 6 的 kernel instrumentation histogram 所示，核心中 `list_sort` 的呼叫分佈極度不均：99.5% 的呼叫來自 `__xfs_trans_commit`、只排序 3-7 個元素，但 CIL checkpoint（`xlog_cil_push_work`）單次處理 ~3,000 個元素、~220 個 runs。這類真實數據對於評估改進方案（包括 Galloping mode）的實際效益至關重要——在 n=5 的串列上差異微乎其微，但在 n=3,000 的 CIL checkpoint 上，run detection 可減少約 33% 比較次數。建議未來的改進分析可透過 debugfs instrumentation 收集核心實際呼叫的串列規模和有序程度，作為效能評估的依據。
 
 ---
 
