@@ -2951,7 +2951,7 @@ Full random 的 overhead 約 5-9%，來自 run boundary detection 的額外比�
 - `apply_instrumentation.sh` — 自動 patch 核心源碼（新增 `lib/list_sort_stats.{c,h}`、修改 `lib/list_sort.c`、`lib/Kconfig.debug`、`lib/Makefile`）
 - `run_workload.sh` — 建立 XFS/btrfs loop device 並執行 I/O 工作負載以觸發 `list_sort()`
 
-具體做法：在 `lib/list_sort.c` 的 `list_sort()` 開頭（串列轉為 singly-linked 之前）插入 O(n) 掃描，計算 ascending/descending run 數量，呼叫 `list_sort_stats_record()` 記錄至全域 atomic counter。以 v6.19 核心源碼為基礎，加上 `CONFIG_LIST_SORT_STATS=y` 編譯選項，在 devcontainer（16 cores）交叉編譯後安裝至 lab-x86。
+具體做法：在 `lib/list_sort.c` 的 `list_sort()` 開頭（串列轉為 singly-linked 之前）插入 O(n) 掃描，計算 ascending/descending run 數量，呼叫 `list_sort_stats_record()` 記錄至全域 atomic counter。以 v6.19 核心源碼為基礎，加上 `CONFIG_LIST_SORT_STATS=y` 編譯選項，在 devcontainer（16 cores）編譯後安裝至 lab-x86。
 
 測試方法：建立 512MB loop device，分別以 XFS 和 btrfs 格式化，執行四種工作負載（mass file creation、random writes、metadata scan、mass deletion），每階段 30 秒。初版 instrumentation 僅記錄全域平均值，得到「平均 5 個元素」的結論；但平均值會掩蓋分佈的細節，因此改為 histogram bucket 版本，以 `[0,10)`, `[10,100)`, `[100,1000)`, `[1000,5000)`, `[5000,10000)`, `[10000,+∞)` 六個區間分別記錄呼叫次數、元素數、run 數與 already-sorted 比例。同時將 `__builtin_return_address(0)` 改為 `__builtin_return_address(1)` 以辨識 `list_sort()` 的實際呼叫者（level 0 只會回傳 `list_sort` 自身的位址）。
 
