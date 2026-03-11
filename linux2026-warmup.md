@@ -3207,6 +3207,78 @@ $$S_p = \frac{T_1}{T_p} = \frac{T_1}{f \cdot T_1 + (1-f) \cdot T_1 / p} = \frac{
 
 DAG 的 work-span 模型更為通用：它不要求並行部分「完美均分」，也適用於遞迴分治、不規則任務圖等任意結構，但只能給出上界。Amdahl's law 因為假設了最簡單的 DAG 結構，所以能給出精確公式。兩者的共同結論是：**加速比受限於不可並行的部分**——在 DAG 模型中是 critical path 長度 $T_\infty$，在 Amdahl's law 中是序列比例 $f$。
 
+### Mach vs. Linux 的排程抽象：從 process-based 到 thread-based
+
+- [ ] Mach microkernel 將 thread 與 task 分離為獨立物件。比較在 NPTL 之前的 Linux 核心與 Mach 的設計，在 scheduling abstraction 上的本質差異，而引入 NPTL 之後又如何讓 Linux 具備現代作業系統的關鍵特徵？
+
+現代作業系統的關鍵特徵是**將資源容器與可排程單位分離**——資源容器持有 address space、file descriptors 等，可排程單位（thread）是排程器操作的對象。同一資源容器內可有多個 thread 共享資源並獨立排程。Mach 從設計之初就實現了這個分離；Linux 則經歷了從 process-based 到 thread-based 的演進。
+
+#### Mach：task/thread 雙物件設計
+
+Mach 將「資源容器」和「執行單位」設計為兩種獨立的核心物件：
+
+- **task**：擁有 address space（virtual memory map）和 port namespace，不可排程
+- **thread**：屬於某個 task，是排程器的操作單位
+
+一個 task 可包含多個 thread，所有 thread 共享 task 的 address space 和 port。排程器只看 thread，完全不涉及 task。這使得多執行緒程式設計成為一等公民——建立新 thread 不需複製 address space，thread 間共享記憶體是天然的。
+
+#### Pre-NPTL Linux：只有 `task_struct`
+
+NPTL 之前的 Linux 核心只有一種可排程實體：`task_struct`。排程器排程的是 `task_struct`（至今仍是，見 [`kernel/sched/core.c:6722`](https://github.com/torvalds/linux/blob/v6.19/kernel/sched/core.c#L6722) 的 `__schedule()`，`prev` 和 `next` 都是 `struct task_struct *`）。
+
+Linux 透過 `clone()` 系統呼叫和旗標組合來模擬 thread。`CLONE_VM`（[`include/uapi/linux/sched.h:11`](https://github.com/torvalds/linux/blob/v6.19/include/uapi/linux/sched.h#L11)）決定是否共享 address space——設定時，子 task 直接引用父 task 的 `mm_struct`（[`kernel/fork.c:1577`](https://github.com/torvalds/linux/blob/v6.19/kernel/fork.c#L1577)）：
+
+```c
+if (clone_flags & CLONE_VM) {
+    mmget(oldmm);
+    mm = oldmm;       /* 共享同一個 mm_struct */
+} else {
+    mm = dup_mm(tsk, current->mm);  /* 複製整個 address space */
+}
+```
+
+早期的 LinuxThreads 函式庫用 `clone()` + `CLONE_VM` 建立「共享 address space 的行程」來模擬 POSIX thread，但有根本缺陷：
+
+- **每個 thread 有獨立的 PID**：核心沒有 thread group 的概念，`getpid()` 在不同 thread 回傳不同值，違反 POSIX 規範
+- **信號處理錯誤**：`kill()` 只能送到單一 `task_struct`，無法送到整個 thread group
+- **需要 manager thread**：LinuxThreads 用額外的管理 thread 協調建立和銷毀，增加開銷
+
+本質上，Linux 的排程抽象只有 process，thread 是用 process 硬拼出來的。
+
+#### NPTL：核心層級的 thread group 支援
+
+NPTL（Native POSIX Threads Library）不只是 userspace 函式庫的改進，它依賴核心 2.6 引入的關鍵機制：
+
+**1. `CLONE_THREAD` 與 `tgid`：** `CLONE_THREAD`（[`include/uapi/linux/sched.h:19`](https://github.com/torvalds/linux/blob/v6.19/include/uapi/linux/sched.h#L19)）使新 task 加入父 task 的 thread group。`task_struct` 同時有 `pid`（每個 task 唯一）和 `tgid`（thread group ID，[`include/linux/sched.h:1060-1061`](https://github.com/torvalds/linux/blob/v6.19/include/linux/sched.h#L1060)）。設定 `CLONE_THREAD` 時（[`kernel/fork.c:2291`](https://github.com/torvalds/linux/blob/v6.19/kernel/fork.c#L2291)）：
+
+```c
+if (clone_flags & CLONE_THREAD) {
+    p->group_leader = current->group_leader;
+    p->tgid = current->tgid;    /* 共享 tgid */
+} else {
+    p->group_leader = p;
+    p->tgid = p->pid;           /* 新 process，tgid = 自己的 pid */
+}
+```
+
+`getpid()` 回傳的是 `tgid` 而非 `pid`（[`kernel/sys.c:999`](https://github.com/torvalds/linux/blob/v6.19/kernel/sys.c#L999)：`return task_tgid_vnr(current)`），因此同一 process 內所有 thread 的 `getpid()` 回傳相同值，符合 POSIX 語意。
+
+**2. Thread group 信號傳遞：** `kill()` 現在透過 `PIDTYPE_TGID` 將信號送到整個 thread group（[`kernel/signal.c:1471`](https://github.com/torvalds/linux/blob/v6.19/kernel/signal.c#L1471)），再由核心選擇 group 內適當的 thread 處理，而非送到單一 task。
+
+**3. `futex`：** 核心提供的快速 userspace 同步原語（[`kernel/futex/syscalls.c:188`](https://github.com/torvalds/linux/blob/v6.19/kernel/futex/syscalls.c#L188)），讓 mutex、condition variable 等在無競爭時完全在 userspace 完成，有競爭時才進核心。這取代了 LinuxThreads 依賴 signal 實作同步的低效做法。
+
+#### 設計哲學的對比
+
+|  | Mach | Pre-NPTL Linux | Post-NPTL Linux |
+|--|------|---------------|----------------|
+| 資源容器 | `task`（獨立物件） | `task_struct`（兼任） | `task_struct` + `tgid` thread group |
+| 可排程單位 | `thread`（獨立物件） | `task_struct` | `task_struct` |
+| 排程器看到 | 只有 thread | 只有 process | `task_struct`（可為 process 或 thread） |
+| 建立 thread | 核心原生操作 | `clone()` 模擬 | `clone()` + `CLONE_THREAD` |
+| 資源共享 | task 內 thread 天然共享 | `CLONE_VM` 等旗標控制 | 同左 |
+
+Linux 沒有像 Mach 那樣建立兩種獨立的核心物件，而是用 clone flags 讓同一個 `task_struct` 同時扮演 process 和 thread 的角色。這是一種務實的設計——避免引入新的核心物件和對應的生命週期管理，透過旗標組合在單一抽象上實現相同的語意分離。NPTL 之後，Linux 在排程抽象上達到了與 Mach 等同的能力：資源容器（thread group / `tgid`）與可排程單位（個別 `task_struct`）的分離。
+
 ---
 
 ## 參考資料
