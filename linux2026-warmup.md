@@ -3225,7 +3225,7 @@ NPTL 出現之前，Linux 把 process 當作最基本的 abstraction——schedu
 
 #### NPTL：核心加入 thread group，glibc 提供高效 thread library
 
-NPTL（Native POSIX Threads Library）是 glibc 中取代 LinuxThreads 的 thread library，依賴核心 2.6 引入的三項機制：
+NPTL（Native POSIX Threads Library）是 glibc 中取代 LinuxThreads 的 thread library，依賴核心的三項機制：
 
 1. **`CLONE_THREAD`**（[`include/uapi/linux/sched.h:19`](https://github.com/torvalds/linux/blob/v6.19/include/uapi/linux/sched.h#L19)）：使新 task 加入父 task 的 thread group，共享 `tgid`（[`kernel/fork.c:2291`](https://github.com/torvalds/linux/blob/v6.19/kernel/fork.c#L2291)）。核心強制 `CLONE_THREAD` → `CLONE_SIGHAND` → `CLONE_VM` 的依賴鏈（[`kernel/fork.c:1993-2002`](https://github.com/torvalds/linux/blob/v6.19/kernel/fork.c#L1993)），因此指定 `CLONE_THREAD` 即隱含共享 address space 和 signal handler。`getpid()` 回傳 `tgid`（[`kernel/sys.c:999`](https://github.com/torvalds/linux/blob/v6.19/kernel/sys.c#L999)），同一 process 內所有 thread 看到相同 PID。
 2. **Thread group 信號傳遞**：`kill()` 透過 `PIDTYPE_TGID` 將信號送到整個 thread group（[`kernel/signal.c:1471`](https://github.com/torvalds/linux/blob/v6.19/kernel/signal.c#L1471)），而非單一 task。
@@ -3240,6 +3240,37 @@ NPTL（Native POSIX Threads Library）是 glibc 中取代 LinuxThreads 的 threa
 | 分離方式 | 設計時就是兩種物件 | 無分離 | `clone()` 旗標組合 |
 
 Linux 沒有像 Mach 建立兩種獨立的核心物件，而是用 clone flags 讓同一個 `task_struct` 同時扮演 process 和 thread。NPTL 之後，Linux 在排程抽象上達到了與 Mach 等同的能力——資源容器與可排程單位的分離——補齊了 multiprocessing 這項現代作業系統的關鍵特徵。
+
+### VFS / network stack 遷移至 userspace 的影響分析
+
+- [ ] 若將 Linux 的 VFS 或 network stack 遷移至 userspace (類似 microkernel multi-server 模型), 分析: context switch 數量變化, cache locality, fault isolation, worst-case latency
+
+#### Context switch 數量
+
+以 `read()` 為例。在 monolithic 架構中，應用程式發出 `read()` 後（[`fs/read_write.c:722`](https://github.com/torvalds/linux/blob/v6.19/fs/read_write.c#L722)），整個路徑——`ksys_read()` → `vfs_read()` → 具體檔案系統的 `read_iter()`——全部在同一次系統呼叫的核心態中完成，只需 1 次 user→kernel 切換 + 1 次 kernel→user 返回。網路收送亦同：`sock_sendmsg()`（[`net/socket.c:753`](https://github.com/torvalds/linux/blob/v6.19/net/socket.c#L753)）直接在核心態呼叫 `tcp_sendmsg()`（[`net/ipv4/tcp.c:1407`](https://github.com/torvalds/linux/blob/v6.19/net/ipv4/tcp.c#L1407)），一路到網卡驅動，不需額外的 IPC。
+
+若改為 multi-server 模型，VFS server 和 network server 各自是獨立的 userspace 行程。同樣的 `read()` 至少需要：app→kernel（IPC）→VFS server→kernel（IPC）→filesystem server→kernel→app，每經過一個 server 至少多 2 次 domain crossing（進出核心）。
+#### Cache locality
+
+每次切換 address space 會導致 TLB flush 和 cache pollution。在 monolithic 架構中，VFS 層和具體檔案系統的程式碼共享核心的 address space，資料在 page cache（[`mm/filemap.c`](https://github.com/torvalds/linux/blob/v6.19/mm/filemap.c)）中可直接存取。Multi-server 模型下，不同 server 有各自的 address space，資料需要透過 IPC 複製或 shared memory mapping 傳遞。
+
+不過 L4 的經驗指出，**極小的核心反而能改善 cache 行為**。Liedtke 在〈µ-kernels Must and Can Be Small〉中指出：更小的核心使用的 cache 自然更小，因 cache miss 帶來的開銷也更小。L4 的目標是讓核心程式碼完全容納於 L1 I-cache 內。2016 年 ARM Cortex-A57 的 48K L1 I-cache 已能容納精簡後的 L4 實作。換言之，cache locality 的損失取決於實作品質，而非架構必然的缺陷。
+
+#### Fault isolation
+
+Fault isolation 是 microkernel 的經典優勢：VFS server 或 network server 崩潰時，核心本身不受影響，理論上可重啟該 server 恢復服務。但課程教材指出一個重要的現實限制：
+
+> 現代硬體難以彰顯 microkernel 當初藉由搬離裝置驅動程式，達到穩定的設計目標。
+
+1980 年代的硬體很「笨」——作業系統直接控制磁碟的扇區和軌道，重啟驅動程式確實能恢復硬體狀態。但現代的儲存裝置、GPU、網路裝置內部就是一台電腦（甚至多處理器），擁有持久的內部狀態，可直接存取系統記憶體。重啟 GPU 驅動程式無法保證 GPU 處於可用狀態。因此，fault isolation 對 VFS 這類純軟體的服務仍有效，但對硬體驅動的保護程度不如預期。
+
+#### Worst-case latency
+
+多次 IPC 增加了請求的最長路徑，worst-case latency 相應增加。但 QNX 的經驗顯示這並非不可克服：Unix 和 Mach 使用同步系統呼叫，而 QNX 使用非同步系統呼叫，使其在即時場景（車載系統、核電站控制）中達到可接受的 worst-case latency，並在車用市場佔有率達到 75%。
+
+對 Linux 的 network stack 而言，接收路徑已有非同步成分——softirq 的 `net_rx_action()`（[`net/core/dev.c:7857`](https://github.com/torvalds/linux/blob/v6.19/net/core/dev.c#L7857)）由軟體中斷觸發處理封包，與應用程式的系統呼叫路徑分離。若遷移至 userspace，原本在核心態 softirq 中一次完成的收包+協定處理，需改為跨 server 的 IPC 傳遞，worst-case latency 勢必增加。但 DPDK 等 userspace networking 方案表明，繞過核心直接在 userspace 處理封包，反而可以降低延遲——不過那是 bypass 而非 microkernel multi-server 架構。
+
+Monolithic 架構的核心優勢在效能——同一 address space 內的函式呼叫遠快於跨行程 IPC。Microkernel 的優勢在結構清晰和 fault isolation。將 VFS 或 network stack 真正拆分為獨立 userspace server 的代價仍然顯著，這也是 Linux 至今維持 monolithic 架構的主因。
 
 ---
 
