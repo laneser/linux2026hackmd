@@ -3158,6 +3158,55 @@ $m$（join 次數）不影響上界——join 只決定程式結束時剩餘的�
 
 初始直覺可能認為 $n$ 次 fork 產生 $2^n$ 個行程，但那是將「fork 點」理解為「所有現存行程同時 fork 一輪」。實際上每輪若有 $p$ 個行程同時 fork，消耗的是 $p$ 個 fork 點。例如要從 1 個行程擴展到 $2^k$ 個，需要 $1 + 2 + 4 + \cdots + 2^{k-1} = 2^k - 1$ 個 fork 點，代入上界公式得 $(2^k - 1) + 1 = 2^k$，結果一致。
 
+### Critical path 與 Amdahl's law
+
+- [ ] 若 fork-join 模型可抽象為 DAG，請說明 critical path 長度如何決定 theoretical speedup，以及與 Amdahl's law 的關係
+
+將 fork-join 程式建模為 DAG：每個節點是一個計算單元，邊代表依賴關係。定義兩個量：
+
+- **Work** $T_1$：所有節點的計算量總和（= 單一處理器的執行時間）
+- **Span** $T_\infty$：DAG 中最長路徑的長度（= 無限處理器時的執行時間，即 critical path）
+
+以 $p$ 個處理器執行時，執行時間 $T_p$ 受兩個下界約束：
+
+$$T_p \geq T_\infty \quad \text{（critical path 上的節點必須依序執行，無法壓縮）}$$
+$$T_p \geq \frac{T_1}{p} \quad \text{（$p$ 個處理器最多分攤 $p$ 倍工作量）}$$
+
+合併得 $T_p \geq \max\!\left(\dfrac{T_1}{p},\; T_\infty\right)$。從這裡推導加速比上界：
+
+$$S_p = \frac{T_1}{T_p}$$
+
+因為 $T_p$ 在分母，$T_p$ 越大則 $S_p$ 越小。取 $T_p$ 的下界（最小值）可得 $S_p$ 的上界（最大值）。分別代入兩個下界：
+
+- 由 $T_p \geq T_\infty$：$S_p = \dfrac{T_1}{T_p} \leq \dfrac{T_1}{T_\infty}$
+- 由 $T_p \geq \dfrac{T_1}{p}$：$S_p = \dfrac{T_1}{T_p} \leq \dfrac{T_1}{T_1/p} = p$
+
+兩個上界同時成立，取較緊的：
+
+$$S_p \leq \min\!\left(p,\; \frac{T_1}{T_\infty}\right)$$
+
+$T_1 / T_\infty$ 稱為 DAG 的 **parallelism**（最大可利用並行度）。無論處理器數量多大，加速比不可能超過此值。
+
+**與 Amdahl's law 的關係：** Amdahl's law 是上述 DAG 模型的特例。假設程式中有比例 $f$ 的工作是序列的（只能由一個處理器執行），其餘 $(1-f)$ 可完美並行化。這對應一個特殊的 DAG 結構——序列段接完全並行段再接序列段。
+
+在這個 DAG 中，critical path 長度 $T_\infty = f \cdot T_1$（序列部分無法縮短，並行部分在無限處理器下趨近零）。代入 DAG 上界可直接得到 $p \to \infty$ 的極限：
+
+$$S_\infty \leq \frac{T_1}{T_\infty} = \frac{T_1}{f \cdot T_1} = \frac{1}{f}$$
+
+但 Amdahl's law 更進一步——它的 DAG 結構簡單到可以算出**有限 $p$ 的精確執行時間**，不只是上界。以 $p$ 個處理器執行時：
+
+- 序列部分無法分攤，耗時 $f \cdot T_1$
+- 並行部分可完美均分給 $p$ 個處理器，耗時 $(1-f) \cdot T_1 / p$
+- 兩段串接，總執行時間 $T_p = f \cdot T_1 + (1-f) \cdot T_1 / p$
+
+因此加速比為精確值（不只是上界）：
+
+$$S_p = \frac{T_1}{T_p} = \frac{T_1}{f \cdot T_1 + (1-f) \cdot T_1 / p} = \frac{1}{f + (1-f)/p}$$
+
+取 $p \to \infty$：$(1-f)/p \to 0$，得 $S_\infty = 1/f$，與 DAG 上界吻合。
+
+DAG 的 work-span 模型更為通用：它不要求並行部分「完美均分」，也適用於遞迴分治、不規則任務圖等任意結構，但只能給出上界。Amdahl's law 因為假設了最簡單的 DAG 結構，所以能給出精確公式。兩者的共同結論是：**加速比受限於不可並行的部分**——在 DAG 模型中是 critical path 長度 $T_\infty$，在 Amdahl's law 中是序列比例 $f$。
+
 ---
 
 ## 參考資料
