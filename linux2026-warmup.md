@@ -2133,17 +2133,15 @@ $$C_{\text{shift}}(s) = \frac{5000 \times 50 + 100}{10000} \approx 25 \text{ 週
 
 #### 元素大小的影響
 
-上述實驗以 4-byte `int` 為元素，但 Linux 核心中鏈結串列的元素通常是較大的結構體。從 DevContainer（Linux 6.6, WSL2）的 `/proc/slabinfo` 可見常用結構體大小：
+上述實驗以 4-byte `int` 為元素，但 Linux 核心中鏈結串列的元素通常是較大的結構體。從 DevContainer（Linux 6.6, WSL2）的 `/proc/slabinfo` 中篩選**確實作為鏈結串列節點**的結構體：
 
-| slab 名稱 | `objsize` (bytes) | 說明 |
+| slab 名稱 | `objsize` (bytes) | 鏈結串列成員（v6.19） |
 |-----------|------------------|------|
-| `pid` | 128 | 行程 ID |
-| `vm_area_struct` | 176 | 虛擬記憶體區域 |
-| `dentry` | 192 | 目錄項目快取 |
-| `inode_cache` | 624 | VFS inode |
-| `sock_inode_cache` | 832 | socket inode |
-| `signal_cache` | 1,152 | 信號處理 |
-| `task_struct` | 11,840 | 行程描述子 |
+| `vm_area_struct` | 176 | `anon_vma_chain`（[`include/linux/mm_types.h:957`](https://github.com/torvalds/linux/blob/v6.19/include/linux/mm_types.h#L957)） |
+| `dentry` | 192 | `d_hash`, `d_lru`, `d_sib`, `d_alias`（[`include/linux/dcache.h:96-129`](https://github.com/torvalds/linux/blob/v6.19/include/linux/dcache.h#L96)） |
+| `inode_cache` | 624 | `i_hash`, `i_io_list`, `i_lru`, `i_sb_list`, `i_wb_list`（[`include/linux/fs.h:824-856`](https://github.com/torvalds/linux/blob/v6.19/include/linux/fs.h#L824)） |
+| `sock_inode_cache` | 832 | 透過內嵌的 `struct inode vfs_inode`（[`include/net/sock.h:1523`](https://github.com/torvalds/linux/blob/v6.19/include/net/sock.h#L1523)）參與上述 inode 鏈結串列 |
+| `task_struct` | 11,840 | `tasks`, `children`, `sibling`, `pid_links` 等 7+ 個（[`include/linux/sched.h:957-1098`](https://github.com/torvalds/linux/blob/v6.19/include/linux/sched.h#L957)） |
 
 多數結構體 $\geq 128$ bytes，`task_struct` 更達 11 KB。成本模型預測 $C_{\text{arr}}(n, i, s)$ 隨 $s$ 線性成長而 $C_{\text{LL}}(n, i, s)$ 幾乎不變，以下在三台機器上以 $s = 4 / 32 / 128 / 512$ bytes 實測驗證：
 
