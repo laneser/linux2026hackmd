@@ -3211,7 +3211,7 @@ DAG 的 work-span 模型更為通用：它不要求並行部分「完美均分�
 
 - [ ] Mach microkernel 將 thread 與 task 分離為獨立物件。比較在 NPTL 之前的 Linux 核心與 Mach 的設計，在 scheduling abstraction 上的本質差異，而引入 NPTL 之後又如何讓 Linux 具備現代作業系統的關鍵特徵？
 
-現代作業系統的關鍵特徵是**將資源容器與可排程單位分離**——資源容器持有 address space、file descriptors 等，可排程單位（thread）是排程器操作的對象。同一資源容器內可有多個 thread 共享資源並獨立排程。Mach 從設計之初就實現了這個分離；Linux 則經歷了從 process-based 到 thread-based 的演進。
+依據課程教材，現代作業系統的三大關鍵特徵為：paged virtual memory（3BSD, 1979）、TCP/IP networking（BSD 4.1, 1983）、multiprocessing（Sequent Balance, 1984）。Linux 很早就具備前兩者，但在 NPTL 之前缺乏高效的多執行緒支援，限制了 multiprocessing 能力。問題的核心在於排程抽象：要在 SMP 系統上高效運行多執行緒程式，核心需要**將資源容器（address space、file descriptors）與可排程單位（thread）分離**——同一資源容器內可有多個 thread 共享資源並獨立排程。Mach 從設計之初就實現了這個分離；Linux 則經歷了從 process-based 到 thread-based 的演進。
 
 #### Mach：task/thread 雙物件設計
 
@@ -3277,7 +3277,7 @@ if (clone_flags & CLONE_THREAD) {
 | 建立 thread | 核心原生操作 | `clone()` 模擬 | `clone()` + `CLONE_THREAD` |
 | 資源共享 | task 內 thread 天然共享 | `CLONE_VM` 等旗標控制 | 同左 |
 
-Linux 沒有像 Mach 那樣建立兩種獨立的核心物件，而是用 clone flags 讓同一個 `task_struct` 同時扮演 process 和 thread 的角色。這是一種務實的設計——避免引入新的核心物件和對應的生命週期管理，透過旗標組合在單一抽象上實現相同的語意分離。NPTL 之後，Linux 在排程抽象上達到了與 Mach 等同的能力：資源容器（thread group / `tgid`）與可排程單位（個別 `task_struct`）的分離。
+Linux 沒有像 Mach 那樣建立兩種獨立的核心物件，而是用 clone flags 讓同一個 `task_struct` 同時扮演 process 和 thread 的角色。這是一種務實的設計——避免引入新的核心物件和對應的生命週期管理，透過旗標組合在單一抽象上實現相同的語意分離。NPTL 之後，Linux 在排程抽象上達到了與 Mach 等同的能力：資源容器（thread group / `tgid`）與可排程單位（個別 `task_struct`）的分離，補齊了現代作業系統三大關鍵特徵中的 multiprocessing——讓多執行緒程式能在 SMP 系統上高效且符合 POSIX 語意地運行。
 
 ---
 
