@@ -3272,6 +3272,45 @@ Fault isolation 是 microkernel 的經典優勢：VFS server 或 network server 
 
 Monolithic 架構的核心優勢在效能——同一 address space 內的函式呼叫遠快於跨行程 IPC。Microkernel 的優勢在結構清晰和 fault isolation。將 VFS 或 network stack 真正拆分為獨立 userspace server 的代價仍然顯著，這也是 Linux 至今維持 monolithic 架構的主因。
 
+### Page fault 存取延遲的期望值模型
+
+- [ ] 若 page fault handler 的平均成本為 $T_{pf}$，page fault 發生機率為 $p$，建立整體存取延遲的期望值模型
+
+每次記憶體存取有兩種情況：
+
+- 機率 $(1-p)$：頁面已在實體記憶體中，存取延遲為 $T_{mem}$（正常記憶體存取時間）
+- 機率 $p$：發生 page fault，延遲為 $T_{pf}$
+
+根據期望值定義，整體存取延遲為：
+
+$$E[T] = (1-p) \cdot T_{mem} + p \cdot T_{pf}$$
+
+### Spinlock 保護全域計數器的 scalability 分析
+
+- [ ] scalability 常來自 cache coherence 與 lock 競爭。給定全域計數器使用 spinlock 保護，在 $N$ 核系統中，若每核每秒更新 $f$ 次，估算 coherence traffic 與 lock contention 成長趨勢
+
+#### 前提：spinlock 的運作機制
+
+Linux 的 spinlock（queued spinlock）在 fast path 透過 `atomic_try_cmpxchg_acquire` 嘗試取得鎖（[`include/asm-generic/qspinlock.h:111`](https://github.com/torvalds/linux/blob/v6.19/include/asm-generic/qspinlock.h#L111)），失敗則進入 `queued_spin_lock_slowpath` 排隊（[`kernel/locking/qspinlock.c:130`](https://github.com/torvalds/linux/blob/v6.19/kernel/locking/qspinlock.c#L130)）。`cmpxchg` 是 atomic read-modify-write 操作，硬體必須取得該 cache line 的**獨佔所有權**（MESI 協定的 Exclusive/Modified 狀態），這會觸發 invalidate 訊息讓其他所有持有該 cache line 的核心失效。
+
+#### Coherence traffic
+
+每次一個核心成功取得 spinlock 並更新計數器，涉及兩次寫入（lock acquire + counter write），每次寫入都讓其他核心的 cache line 失效。整個系統每秒共 $N \cdot f$ 次更新，每次更新產生 $O(N)$ 個 invalidate 訊息（通知其餘 $N-1$ 個核心）。因此：
+
+$$\text{coherence traffic} = O(N^2 \cdot f)$$
+
+coherence traffic 隨核心數**平方成長**。這是因為每次寫入的 invalidation 成本與核心數成正比，而寫入次數本身也與核心數成正比。
+
+#### Lock contention
+
+Spinlock 是序列化的——同一時間只有一個核心能持有鎖。設每次取得鎖到釋放鎖的時間為 $T_{hold}$（包含更新計數器的時間），則鎖的最大吞吐量為 $1/T_{hold}$ 次/秒。全系統對鎖的需求為 $N \cdot f$ 次/秒。
+
+當 $N \cdot f \cdot T_{hold} \ll 1$ 時，競爭很少，各核心幾乎不需等待。但隨著 $N$ 增加，$N \cdot f \cdot T_{hold}$ 逐漸趨近 1，等待時間急劇上升。Lock contention（等待鎖的時間佔比）成長趨勢為：
+
+$$\text{contention} = O(N)$$
+
+每多一個核心就多一個競爭者，平均等待佇列長度線性成長。當 $N \cdot f$ 超過 $1/T_{hold}$ 時鎖完全飽和，多出的核心全部在空轉（busy-wait）。
+
 ---
 
 ## 參考資料
