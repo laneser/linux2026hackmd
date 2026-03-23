@@ -1160,7 +1160,7 @@ C99 §6.3.2.1¶3：
 
 - [ ] 分析： `double x[3]; int *p = (int *)&x[0]; printf("%d\n", *(p+1));`
 
-`x[0]` 的位址被強制轉型為 `int *` 並賦值給 `p`。`p+1` 前進 `sizeof(int)` = 4 bytes，指向 `x[0]` 的第 4~7 byte（`double` 佔 8 bytes）。`*(p+1)` 將該記憶體區段的 bit pattern 當作 `int` 印出。
+`x[0]` 的位址被強制轉型為 `int *` 並指派給 `p`。`p+1` 前進 `sizeof(int)` = 4 bytes，指向 `x[0]` 的第 4~7 byte（`double` 佔 8 bytes）。`*(p+1)` 將該記憶體區段的 bit pattern 當作 `int` 印出。
 
 此外 `x[3]` 未初始化，其值為 indeterminate（§6.2.4¶5：automatic storage duration 的 object，初始值是 indeterminate），讀取 indeterminate value 本身即是未定義行為。
 
@@ -1232,7 +1232,7 @@ C99 §6.5.2.2¶4：
 
 > An argument may be an expression of any object type. In preparing for the call to a function, the arguments are evaluated, and each parameter is assigned the value of the corresponding argument.
 
-每個參數都是「被賦值」——是值的複製，不是變數的別名。因此：
+每個參數都是「被指派」——是值的複製，不是變數的別名。因此：
 
 - `func(int *p)` 中 `p` 收到的是 `ptrA` 的值（`&A`）的複本。修改 `p` 只改了複本，`ptrA` 不變
 - `func(int **p)` 中 `p` 收到的是 `&ptrA` 的值的複本。但透過 `*p` 可以間接存取 `ptrA` 本身，`*p = &B` 改變了 `ptrA` 的內容
